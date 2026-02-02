@@ -118,6 +118,7 @@ const (
 	T_XmlSerialize
 	T_PartitionElem
 	T_PartitionSpec
+	T_PartitionBoundSpec
 	T_PartitionRangeDatum
 	T_SinglePartitionSpec
 	T_PartitionCmd

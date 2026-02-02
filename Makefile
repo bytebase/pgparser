@@ -30,6 +30,15 @@ clean:
 install-tools:
 	go install golang.org/x/tools/cmd/goyacc@latest
 
+# Copy PostgreSQL regression test SQL files
+copy-regress-sql:
+	mkdir -p parser/pgregress/testdata/sql
+	cp $(PG_SRC)/src/test/regress/sql/*.sql parser/pgregress/testdata/sql/
+
+# Update known_failures.json baseline
+update-known-failures:
+	cd parser/pgregress && go test -run TestPGRegress -update -v -count=1
+
 # Analyze PostgreSQL grammar (for development)
 analyze-gram:
 	@echo "Grammar lines: $$(wc -l < $(PG_SRC)/src/backend/parser/gram.y)"

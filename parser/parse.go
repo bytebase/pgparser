@@ -1,6 +1,8 @@
 // Package parser provides the public API for parsing PostgreSQL SQL.
 package parser
 
+//go:generate goyacc -o parser.go -p pg gram.y
+
 import (
 	"fmt"
 
@@ -18,6 +20,12 @@ type parserLexer struct {
 	lexer  *Lexer
 	result *nodes.List
 	err    error
+
+	// One-token lookahead for NOT_LA, NULLS_LA, WITH_LA, FORMAT_LA.
+	// PostgreSQL's parser.c uses this to disambiguate tokens based on context.
+	haveLookahead    bool
+	lookaheadToken   Token
+	lookaheadTokType int
 }
 
 // newParserLexer creates a new lexer adapter for the parser.
@@ -27,12 +35,38 @@ func newParserLexer(input string) *parserLexer {
 	}
 }
 
-// Lex implements pgLexer.Lex
+// Lex implements pgLexer.Lex.
+// This includes one-token lookahead logic matching PostgreSQL's parser.c
+// to replace NOT→NOT_LA, NULLS_P→NULLS_LA, WITH→WITH_LA, FORMAT→FORMAT_LA
+// when followed by specific keywords.
 func (l *parserLexer) Lex(lval *pgSymType) int {
-	tok := l.lexer.NextToken()
+	var tok Token
+	var tokType int
 
-	// Map lexer token types to parser token types
-	tokType := l.mapTokenType(tok)
+	// Return buffered lookahead token if we have one
+	if l.haveLookahead {
+		tok = l.lookaheadToken
+		tokType = l.lookaheadTokType
+		l.haveLookahead = false
+	} else {
+		tok = l.lexer.NextToken()
+		tokType = l.mapTokenType(tok)
+	}
+
+	// Check if this token needs lookahead-based replacement
+	if l.needsLookahead(tokType) {
+		// Peek at the next token
+		nextTok := l.lexer.NextToken()
+		nextTokType := l.mapTokenType(nextTok)
+
+		// Save it for the next Lex() call
+		l.haveLookahead = true
+		l.lookaheadToken = nextTok
+		l.lookaheadTokType = nextTokType
+
+		// Replace current token based on lookahead
+		tokType = l.applyLookahead(tokType, nextTokType)
+	}
 
 	// Set semantic values based on token type
 	switch tokType {
@@ -52,6 +86,46 @@ func (l *parserLexer) Lex(lval *pgSymType) int {
 	}
 
 	return tokType
+}
+
+// needsLookahead returns true if the token type may need replacement
+// based on the following token (matching PostgreSQL's parser.c logic).
+func (l *parserLexer) needsLookahead(tokType int) bool {
+	switch tokType {
+	case NOT:
+		return true
+	case WITH:
+		return true
+	case NULLS_P:
+		return true
+	}
+	return false
+}
+
+// applyLookahead replaces the current token type based on the next token,
+// matching PostgreSQL's parser.c lookahead logic.
+func (l *parserLexer) applyLookahead(curToken, nextToken int) int {
+	switch curToken {
+	case NOT:
+		// Replace NOT by NOT_LA if followed by BETWEEN, IN, LIKE, ILIKE, SIMILAR
+		switch nextToken {
+		case BETWEEN, IN_P, LIKE, ILIKE, SIMILAR:
+			return NOT_LA
+		}
+	case WITH:
+		// Replace WITH by WITH_LA if followed by TIME (for WITH TIME ZONE)
+		switch nextToken {
+		case TIME:
+			return WITH_LA
+		}
+	case NULLS_P:
+		// Replace NULLS_P by NULLS_LA if followed by FIRST, LAST, DISTINCT, or NOT
+		switch nextToken {
+		case FIRST_P, LAST_P, DISTINCT, NOT:
+			return NULLS_LA
+		}
+	}
+	return curToken
 }
 
 // Error implements pgLexer.Error

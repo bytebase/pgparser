@@ -513,12 +513,12 @@ func TestInsertOnConflictWithInfer(t *testing.T) {
 		t.Fatalf("expected 1 index element, got %v", stmt.OnConflictClause.Infer.IndexElems)
 	}
 
-	elem, ok := stmt.OnConflictClause.Infer.IndexElems.Items[0].(*nodes.String)
+	elem, ok := stmt.OnConflictClause.Infer.IndexElems.Items[0].(*nodes.IndexElem)
 	if !ok {
-		t.Fatalf("expected *nodes.String, got %T", stmt.OnConflictClause.Infer.IndexElems.Items[0])
+		t.Fatalf("expected *nodes.IndexElem, got %T", stmt.OnConflictClause.Infer.IndexElems.Items[0])
 	}
-	if elem.Str != "id" {
-		t.Errorf("expected 'id', got %q", elem.Str)
+	if elem.Name != "id" {
+		t.Errorf("expected 'id', got %q", elem.Name)
 	}
 }
 

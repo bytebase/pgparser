@@ -26,6 +26,8 @@ import (
 	setop     int        // for SetOperation values
 	slimit    *SelectLimit  // for LIMIT/OFFSET
 	typename  *nodes.TypeName  // for Typename values
+	partspec  *nodes.PartitionSpec
+	partbound *nodes.PartitionBoundSpec
 }
 
 // Token types from the lexer
@@ -34,7 +36,9 @@ import (
 %token <ival>  ICONST PARAM
 %token         TYPECAST DOT_DOT COLON_EQUALS EQUALS_GREATER
 %token         LESS_EQUALS GREATER_EQUALS NOT_EQUALS
-%token         NOT_LA  /* lookahead token for NOT LIKE etc */
+%token         NOT_LA    /* lookahead token for NOT LIKE etc */
+%token         WITH_LA   /* lookahead token for WITH TIME ZONE */
+%token         NULLS_LA  /* lookahead token for NULLS FIRST/LAST */
 
 // Keyword tokens (must match keywords.go)
 %token <str> ABORT_P ABSENT ABSOLUTE_P ACCESS ACTION ADD_P ADMIN AFTER
@@ -115,20 +119,26 @@ import (
 %type <list>  stmtblock
 %type <node>  stmt SelectStmt simple_select select_clause
 %type <node>  select_with_parens select_no_parens
-%type <node>  a_expr b_expr c_expr columnref AexprConst func_expr func_application
-%type <node>  target_el where_clause
-%type <str>   func_name
+%type <node>  a_expr b_expr c_expr columnref AexprConst func_expr func_application func_expr_common_subexpr
+%type <node>  target_el where_clause where_or_current_clause
+%type <list>  func_name
 %type <list>  from_clause
 %type <node>  table_ref relation_expr joined_table join_qual
+%type <node>  func_table tablesample_clause
+%type <boolean>  opt_ordinality
+%type <node>  opt_repeatable_clause
 %type <ival>  join_type
 %type <list>  stmtmulti target_list from_list opt_target_list
 %type <list>  group_clause group_by_list
 %type <node>  group_by_item having_clause
+%type <node>  empty_grouping_set cube_clause rollup_clause grouping_sets_clause
 %type <list>  sort_clause opt_sort_clause sortby_list
 %type <list>  expr_list opt_indirection indirection func_arg_list
+%type <list>  extract_list overlay_list position_list substr_list trim_list
+%type <str>   extract_arg unicode_normal_form
 %type <node>  sortby indirection_el func_arg_expr
 %type <str>   name ColId ColLabel attr_name
-%type <str>   opt_alias_clause alias_clause
+%type <node>   opt_alias_clause alias_clause func_alias_clause
 %type <str>   unreserved_keyword col_name_keyword type_func_name_keyword reserved_keyword
 %type <list>  opt_name_list name_list any_name qualified_name
 %type <ival>  opt_asc_desc
@@ -136,14 +146,31 @@ import (
 %type <str>   Sconst
 %type <boolean> opt_all_clause opt_distinct_clause set_quantifier
 %type <node>  with_clause opt_with_clause common_table_expr
+%type <ival>  opt_materialized
 %type <list>  cte_list
-%type <slimit> select_limit limit_clause
+%type <list>  window_clause window_definition_list
+%type <node>  window_definition window_specification over_clause opt_frame_clause frame_extent frame_bound
+%type <str>   opt_existing_window_name
+%type <list>  opt_partition_clause
+%type <ival>  opt_window_exclusion_clause
+%type <node>  within_group_clause filter_clause
+%type <node>  func_expr_windowless
+%type <slimit> select_limit limit_clause opt_select_limit
+%type <list>  for_locking_clause opt_for_locking_clause for_locking_items
+%type <node>  for_locking_item
+%type <ival>  for_locking_strength opt_nowait_or_skip
+%type <list>  locked_rels_list
 %type <node>   offset_clause select_limit_value select_offset_value select_fetch_first_value
 %type <ival>   sub_type
 %type <list>   subquery_Op
 %type <node>   case_expr when_clause case_default case_arg
 %type <list>   when_clause_list
 %type <typename>  Typename SimpleTypename GenericType Numeric opt_float Character
+%type <typename>  ConstDatetime ConstInterval Bit BitWithLength BitWithoutLength
+%type <typename>  ConstTypename ConstBit ConstCharacter
+%type <boolean>  opt_timezone
+%type <list>  opt_interval
+%type <list>  interval_second
 %type <list>      opt_type_modifiers opt_array_bounds
 %type <str>       type_function_name
 %type <boolean>   opt_varying
@@ -157,19 +184,34 @@ import (
 %type <node>  insert_column_item
 %type <node>  opt_on_conflict
 %type <node>  values_clause
-%type <list>  set_clause_list
+%type <list>  set_clause_list set_target_list
 %type <node>  set_clause set_target
+%type <node>  into_clause OptTempTableName
+%type <list>  rowsfrom_list opt_col_def_list
+%type <node>  rowsfrom_item
+%type <node>  opt_search_clause opt_cycle_clause
+%type <node>  join_using_alias
 %type <node>  UpdateStmt
 %type <node>  DeleteStmt
 %type <list>  using_clause
 %type <node>  relation_expr_opt_alias
 %type <node>  CreateStmt
 %type <ival>  OptTemp
-%type <list>  OptTableElementList TableElementList
-%type <node>  TableElement columnDef TableConstraint
+%type <list>  OptTableElementList TableElementList OptTypedTableElementList TypedTableElementList
+%type <node>  TypedTableElement columnOptions
+%type <node>  TableElement columnDef TableConstraint TableLikeClause
+%type <ival>  TableLikeOptionList TableLikeOption
 %type <list>  ColConstraintList opt_column_constraints
-%type <node>  ColConstraint ColConstraintElem ConstraintElem
+%type <node>  ColConstraint ColConstraintElem ConstraintAttr ConstraintElem
+%type <node>  DomainConstraint DomainConstraintElem
 %type <list>  opt_column_list columnList
+%type <partspec>  OptPartitionSpec PartitionSpec_rule
+%type <list>  OptWith
+%type <ival>  OnCommitOption
+%type <str>   OptTableSpace OptAccessMethod
+%type <list>  part_params OptInherit opt_collate
+%type <node>  part_elem
+%type <partbound>  PartitionBoundSpec ForValues
 %type <node>  AlterTableStmt RenameStmt DropStmt
 %type <list>  alter_table_cmds
 %type <node>  alter_table_cmd
@@ -179,7 +221,7 @@ import (
 %type <node>  IndexStmt
 %type <boolean>  opt_unique opt_concurrently
 %type <str>   opt_single_name access_method_clause
-%type <list>  index_params
+%type <list>  index_params opt_include index_including_params
 %type <node>  index_elem
 %type <ival>  opt_nulls_order
 %type <node>  ViewStmt
@@ -188,21 +230,28 @@ import (
 %type <boolean>  opt_or_replace
 %type <list>  func_args_with_defaults func_args_with_defaults_list
 %type <node>  func_arg_with_default func_arg
+%type <list>  table_func_column_list
+%type <node>  table_func_column
 %type <str>   param_name
 %type <ival>  arg_class
 %type <typename>  func_return func_type
-%type <list>  createfunc_opt_list
+%type <list>  createfunc_opt_list opt_createfunc_opt_list
 %type <node>  createfunc_opt_item common_func_opt_item
+%type <node>  opt_routine_body ReturnStmt routine_body_stmt
+%type <list>  routine_body_stmt_list
 %type <node>  TransactionStmt
 %type <boolean>  opt_transaction_chain
 %type <node>  ExplainStmt ExplainableStmt
 %type <node>  CopyStmt
 %type <boolean>  copy_from
 %type <str>   copy_file_name
-%type <list>  utility_option_list
+%type <list>  utility_option_list copy_opt_list transaction_mode_list transaction_mode_list_or_empty
+%type <node>  copy_opt_item transaction_mode_item
+%type <str>   iso_level
 %type <node>  utility_option_elem
 %type <str>   utility_option_name
 %type <node>  utility_option_arg
+%type <list>  utility_option_arg_list
 %type <str>   opt_boolean_or_string
 %type <node>  NumericOnly
 %type <node>  GrantStmt RevokeStmt
@@ -223,9 +272,6 @@ import (
 %type <str>   NonReservedWord_or_Sconst NonReservedWord
 %type <ival>  document_or_content
 %type <list>  prep_type_clause execute_param_clause
-%type <list>  transaction_mode_list
-%type <node>  transaction_mode_item
-%type <str>   iso_level
 %type <str>   opt_encoding
 %type <node>  reset_rest generic_reset
 %type <list>  type_list
@@ -236,8 +282,8 @@ import (
 %type <list>  relation_expr_list opt_vacuum_relation_list vacuum_relation_list
 %type <node>  vacuum_relation
 %type <ival>  opt_lock lock_type reindex_target_type reindex_target_multitable
-%type <str>   cluster_index_specification comment_text security_label opt_provider
-%type <ival>  object_type_name
+%type <str>   cluster_index_specification column_compression comment_text security_label opt_provider
+%type <ival>  object_type_name object_type_name_on_any_name
 %type <list>  opt_reindex_option_list
 %type <node>  DeclareCursorStmt FetchStmt MergeStmt CallStmt DoStmt
 %type <ival>  cursor_options opt_hold
@@ -272,7 +318,10 @@ import (
 %type <node>  drop_option
 %type <node>  CreateSchemaStmt CreateSeqStmt AlterSeqStmt
 %type <node>  CreateDomainStmt AlterDomainStmt AlterEnumStmt AlterCollationStmt AlterCompositeTypeStmt
-%type <list>  OptSchemaEltList OptSeqOptList SeqOptList
+%type <list>  OptSchemaEltList OptParenthesizedSeqOptList OptSeqOptList SeqOptList
+%type <list>  alter_identity_column_option_list
+%type <node>  alter_identity_column_option
+%type <ival>  generated_when
 %type <node>  SeqOptElem
 %type <node>  schema_stmt
 %type <list>  alter_type_cmds
@@ -288,7 +337,7 @@ import (
 %type <list>  opt_enum_val_list enum_val_list
 %type <list>  aggr_args aggr_args_list
 %type <node>  aggr_arg
-%type <list>  any_operator qual_all_Op
+%type <list>  any_operator qual_all_Op qual_Op
 %type <str>   all_Op MathOp
 %type <node>  AlterFunctionStmt RemoveFuncStmt RemoveAggrStmt RemoveOperStmt
 %type <node>  CreateTrigStmt CreateEventTrigStmt AlterEventTrigStmt
@@ -320,7 +369,36 @@ import (
 %type <boolean>  opt_instead opt_trusted
 %type <list>  handler_name opt_inline_handler opt_validator
 %type <ival>  ConstraintAttributeSpec ConstraintAttributeElem
+%type <ival>  key_match key_actions key_update key_delete key_action
+%type <list>  opt_c_include ExclusionConstraintList
+%type <list>  ExclusionConstraintElem
+%type <str>   OptConsTableSpace ExistingIndex
+%type <node>  hash_partbound hash_partbound_elem
 %type <node>  OptConstrFromTable
+%type <node>  xml_root_version opt_xml_root_standalone
+%type <node>  xmlexists_argument
+%type <node>  xmltable xmltable_column_el xmltable_column_option_el
+%type <list>  xml_attribute_list xml_attributes xmltable_column_list xmltable_column_option_list
+%type <list>  xml_namespace_list
+%type <node> xml_attribute_el xml_namespace_el
+%type <ival>  xml_whitespace_option xml_indent_option
+
+%type <node>  json_value_expr json_output_clause_opt json_format_clause_opt
+%type <node>  json_returning_clause_opt
+%type <node>  json_behavior json_behavior_clause_opt json_on_error_clause_opt
+%type <node>  json_table json_table_column_definition json_table_column_path_clause_opt
+%type <list>  json_name_and_value_list json_value_expr_list
+%type <list>  json_arguments json_passing_clause_opt
+%type <list>  json_table_column_definition_list
+%type <list>  json_table_column_option_list
+%type <node>  json_name_and_value json_argument json_table_column_option_el
+%type <node>  json_aggregate_func
+%type <ival>  json_behavior_type json_predicate_type_constraint
+%type <ival>  json_wrapper_behavior json_quotes_clause_opt
+%type <ival>  json_key_uniqueness_constraint_opt
+%type <ival>  json_object_constructor_null_clause_opt json_array_constructor_null_clause_opt
+%type <str>   json_table_path_name_opt path_opt
+%type <list>  json_array_aggregate_order_by_clause_opt
 %type <list>  attrs
 %type <node>  CreateFdwStmt AlterFdwStmt
 %type <node>  CreateForeignServerStmt AlterForeignServerStmt
@@ -391,6 +469,8 @@ import (
 %type <boolean>  opt_no
 %type <node>  create_as_target create_mv_target
 %type <boolean> opt_with_data
+%type <boolean> no_inherit
+%type <boolean> opt_unique_null_treatment
 %type <list>  opt_qualified_name
 %type <node>  set_statistics_value
 %type <list>  opt_stat_name_list
@@ -1005,11 +1085,26 @@ insert_rest:
 				SelectStmt: $1,
 			}
 		}
+	| OVERRIDING override_kind VALUE_P SelectStmt
+		{
+			$$ = &nodes.InsertStmt{
+				Override:   nodes.OverridingKind($2),
+				SelectStmt: $4,
+			}
+		}
 	| '(' insert_column_list ')' SelectStmt
 		{
 			$$ = &nodes.InsertStmt{
 				Cols:       $2,
 				SelectStmt: $4,
+			}
+		}
+	| '(' insert_column_list ')' OVERRIDING override_kind VALUE_P SelectStmt
+		{
+			$$ = &nodes.InsertStmt{
+				Cols:       $2,
+				Override:   nodes.OverridingKind($5),
+				SelectStmt: $7,
 			}
 		}
 	| DEFAULT VALUES
@@ -1052,7 +1147,7 @@ opt_on_conflict:
 				Location:    -1,
 			}
 		}
-	| ON CONFLICT '(' name_list ')' DO NOTHING
+	| ON CONFLICT '(' index_params ')' DO NOTHING
 		{
 			$$ = &nodes.OnConflictClause{
 				Action:   ONCONFLICT_NOTHING,
@@ -1063,7 +1158,7 @@ opt_on_conflict:
 				Location: -1,
 			}
 		}
-	| ON CONFLICT '(' name_list ')' DO UPDATE SET set_clause_list where_clause
+	| ON CONFLICT '(' index_params ')' DO UPDATE SET set_clause_list where_clause
 		{
 			$$ = &nodes.OnConflictClause{
 				Action:      ONCONFLICT_UPDATE,
@@ -1073,6 +1168,32 @@ opt_on_conflict:
 				},
 				TargetList:  $9,
 				WhereClause: $10,
+				Location:    -1,
+			}
+		}
+	| ON CONFLICT '(' index_params ')' WHERE a_expr DO NOTHING
+		{
+			$$ = &nodes.OnConflictClause{
+				Action:   ONCONFLICT_NOTHING,
+				Infer: &nodes.InferClause{
+					IndexElems:  $4,
+					WhereClause: $7,
+					Location:    -1,
+				},
+				Location: -1,
+			}
+		}
+	| ON CONFLICT '(' index_params ')' WHERE a_expr DO UPDATE SET set_clause_list where_clause
+		{
+			$$ = &nodes.OnConflictClause{
+				Action:      ONCONFLICT_UPDATE,
+				Infer: &nodes.InferClause{
+					IndexElems:  $4,
+					WhereClause: $7,
+					Location:    -1,
+				},
+				TargetList:  $11,
+				WhereClause: $12,
 				Location:    -1,
 			}
 		}
@@ -1113,9 +1234,21 @@ returning_clause:
 
 set_clause_list:
 	set_clause
-		{ $$ = makeList($1) }
+		{
+			if list, ok := $1.(*nodes.List); ok {
+				$$ = list
+			} else {
+				$$ = makeList($1)
+			}
+		}
 	| set_clause_list ',' set_clause
-		{ $$ = appendList($1, $3) }
+		{
+			if list, ok := $3.(*nodes.List); ok {
+				$$ = concatLists($1, list)
+			} else {
+				$$ = appendList($1, $3)
+			}
+		}
 	;
 
 set_clause:
@@ -1124,6 +1257,24 @@ set_clause:
 			rt := $1.(*nodes.ResTarget)
 			rt.Val = $3
 			$$ = rt
+		}
+	| '(' set_target_list ')' '=' a_expr
+		{
+			/* multi-column assignment: (a,b) = expr
+			 * Create a list of ResTargets, each with a MultiAssignRef val */
+			targets := $2.Items
+			ncolumns := len(targets)
+			result := &nodes.List{}
+			for i, t := range targets {
+				rt := t.(*nodes.ResTarget)
+				rt.Val = &nodes.MultiAssignRef{
+					Source:   $5,
+					Colno:   i + 1,
+					Ncolumns: ncolumns,
+				}
+				result.Items = append(result.Items, rt)
+			}
+			$$ = result
 		}
 	;
 
@@ -1137,6 +1288,13 @@ set_target:
 		}
 	;
 
+set_target_list:
+	set_target
+		{ $$ = makeList($1) }
+	| set_target_list ',' set_target
+		{ $$ = appendList($1, $3) }
+	;
+
 /*****************************************************************************
  *
  *      UPDATE statement
@@ -1144,7 +1302,7 @@ set_target:
  *****************************************************************************/
 
 UpdateStmt:
-	opt_with_clause UPDATE relation_expr_opt_alias SET set_clause_list from_clause where_clause returning_clause
+	opt_with_clause UPDATE relation_expr_opt_alias SET set_clause_list from_clause where_or_current_clause returning_clause
 		{
 			$$ = &nodes.UpdateStmt{
 				Relation:      $3.(*nodes.RangeVar),
@@ -1166,7 +1324,7 @@ UpdateStmt:
  *****************************************************************************/
 
 DeleteStmt:
-	opt_with_clause DELETE_P FROM relation_expr_opt_alias using_clause where_clause returning_clause
+	opt_with_clause DELETE_P FROM relation_expr_opt_alias using_clause where_or_current_clause returning_clause
 		{
 			$$ = &nodes.DeleteStmt{
 				Relation:      $4.(*nodes.RangeVar),
@@ -1207,21 +1365,127 @@ relation_expr_opt_alias:
  *****************************************************************************/
 
 CreateStmt:
-	CREATE OptTemp TABLE qualified_name '(' OptTableElementList ')'
+	CREATE OptTemp TABLE qualified_name '(' OptTableElementList ')' OptInherit OptPartitionSpec OptAccessMethod OptWith OnCommitOption OptTableSpace
 		{
 			rv := makeRangeVar($4)
 			$$ = &nodes.CreateStmt{
-				Relation:  rv.(*nodes.RangeVar),
-				TableElts: $6,
+				Relation:       rv.(*nodes.RangeVar),
+				TableElts:      $6,
+				InhRelations:   $8,
+				Partspec:       $9,
+				AccessMethod:   $10,
+				Options:        $11,
+				OnCommit:       nodes.OnCommitAction($12),
+				Tablespacename: $13,
 			}
 		}
-	| CREATE OptTemp TABLE IF_P NOT EXISTS qualified_name '(' OptTableElementList ')'
+	| CREATE OptTemp TABLE IF_P NOT EXISTS qualified_name '(' OptTableElementList ')' OptInherit OptPartitionSpec OptAccessMethod OptWith OnCommitOption OptTableSpace
 		{
 			rv := makeRangeVar($7)
 			$$ = &nodes.CreateStmt{
-				Relation:    rv.(*nodes.RangeVar),
-				TableElts:   $9,
-				IfNotExists: true,
+				Relation:       rv.(*nodes.RangeVar),
+				TableElts:      $9,
+				InhRelations:   $11,
+				Partspec:       $12,
+				AccessMethod:   $13,
+				Options:        $14,
+				OnCommit:       nodes.OnCommitAction($15),
+				Tablespacename: $16,
+				IfNotExists:    true,
+			}
+		}
+	| CREATE OptTemp TABLE qualified_name PARTITION OF qualified_name ForValues OptPartitionSpec OptAccessMethod OptWith OnCommitOption OptTableSpace
+		{
+			rv := makeRangeVar($4)
+			inh := makeRangeVar($7)
+			$$ = &nodes.CreateStmt{
+				Relation:       rv.(*nodes.RangeVar),
+				InhRelations:   makeList(inh),
+				Partbound:      $8,
+				Partspec:       $9,
+				AccessMethod:   $10,
+				Options:        $11,
+				OnCommit:       nodes.OnCommitAction($12),
+				Tablespacename: $13,
+			}
+		}
+	| CREATE OptTemp TABLE IF_P NOT EXISTS qualified_name PARTITION OF qualified_name ForValues OptPartitionSpec OptAccessMethod OptWith OnCommitOption OptTableSpace
+		{
+			rv := makeRangeVar($7)
+			inh := makeRangeVar($10)
+			$$ = &nodes.CreateStmt{
+				Relation:       rv.(*nodes.RangeVar),
+				InhRelations:   makeList(inh),
+				Partbound:      $11,
+				Partspec:       $12,
+				AccessMethod:   $13,
+				Options:        $14,
+				OnCommit:       nodes.OnCommitAction($15),
+				Tablespacename: $16,
+				IfNotExists:    true,
+			}
+		}
+	| CREATE OptTemp TABLE qualified_name PARTITION OF qualified_name '(' TypedTableElementList ')' ForValues OptPartitionSpec OptAccessMethod OptWith OnCommitOption OptTableSpace
+		{
+			rv := makeRangeVar($4)
+			inh := makeRangeVar($7)
+			$$ = &nodes.CreateStmt{
+				Relation:       rv.(*nodes.RangeVar),
+				TableElts:      $9,
+				InhRelations:   makeList(inh),
+				Partbound:      $11,
+				Partspec:       $12,
+				AccessMethod:   $13,
+				Options:        $14,
+				OnCommit:       nodes.OnCommitAction($15),
+				Tablespacename: $16,
+			}
+		}
+	| CREATE OptTemp TABLE IF_P NOT EXISTS qualified_name PARTITION OF qualified_name '(' TypedTableElementList ')' ForValues OptPartitionSpec OptAccessMethod OptWith OnCommitOption OptTableSpace
+		{
+			rv := makeRangeVar($7)
+			inh := makeRangeVar($10)
+			$$ = &nodes.CreateStmt{
+				Relation:       rv.(*nodes.RangeVar),
+				TableElts:      $12,
+				InhRelations:   makeList(inh),
+				Partbound:      $14,
+				Partspec:       $15,
+				AccessMethod:   $16,
+				Options:        $17,
+				OnCommit:       nodes.OnCommitAction($18),
+				Tablespacename: $19,
+				IfNotExists:    true,
+			}
+		}
+	/* CREATE TABLE OF typename */
+	| CREATE OptTemp TABLE qualified_name OF any_name OptTypedTableElementList OptAccessMethod OptWith OnCommitOption OptTableSpace
+		{
+			rv := makeRangeVar($4)
+			tn := makeTypeNameFromNameList($6).(*nodes.TypeName)
+			$$ = &nodes.CreateStmt{
+				Relation:       rv.(*nodes.RangeVar),
+				TableElts:      $7,
+				OfTypename:     tn,
+				AccessMethod:   $8,
+				Options:        $9,
+				OnCommit:       nodes.OnCommitAction($10),
+				Tablespacename: $11,
+			}
+		}
+	| CREATE OptTemp TABLE IF_P NOT EXISTS qualified_name OF any_name OptTypedTableElementList OptAccessMethod OptWith OnCommitOption OptTableSpace
+		{
+			rv := makeRangeVar($7)
+			tn := makeTypeNameFromNameList($9).(*nodes.TypeName)
+			$$ = &nodes.CreateStmt{
+				Relation:       rv.(*nodes.RangeVar),
+				TableElts:      $10,
+				OfTypename:     tn,
+				AccessMethod:   $11,
+				Options:        $12,
+				OnCommit:       nodes.OnCommitAction($13),
+				Tablespacename: $14,
+				IfNotExists:    true,
 			}
 		}
 	;
@@ -1235,9 +1499,206 @@ OptTemp:
 	| /* EMPTY */   { $$ = 0 }
 	;
 
+OptInherit:
+	INHERITS '(' qualified_name_list ')'	{ $$ = $3 }
+	| /* EMPTY */							{ $$ = nil }
+	;
+
+OptPartitionSpec:
+	PartitionSpec_rule	{ $$ = $1 }
+	| /* EMPTY */		{ $$ = nil }
+	;
+
+OptAccessMethod:
+	USING name  { $$ = $2 }
+	| /* EMPTY */ { $$ = "" }
+	;
+
+OptWith:
+	WITH reloptions				{ $$ = $2 }
+	| WITH OIDS					{ $$ = nil /* deprecated */ }
+	| WITHOUT OIDS				{ $$ = nil }
+	| /* EMPTY */				{ $$ = nil }
+	;
+
+OnCommitOption:
+	ON COMMIT DROP				{ $$ = int64(nodes.ONCOMMIT_DROP) }
+	| ON COMMIT DELETE_P ROWS	{ $$ = int64(nodes.ONCOMMIT_DELETE_ROWS) }
+	| ON COMMIT PRESERVE ROWS	{ $$ = int64(nodes.ONCOMMIT_PRESERVE_ROWS) }
+	| /* EMPTY */				{ $$ = int64(nodes.ONCOMMIT_NOOP) }
+	;
+
+OptTableSpace:
+	TABLESPACE name				{ $$ = $2 }
+	| /* EMPTY */				{ $$ = "" }
+	;
+
+PartitionSpec_rule:
+	PARTITION BY ColId '(' part_params ')'
+		{
+			$$ = &nodes.PartitionSpec{
+				Strategy:   parsePartitionStrategy($3),
+				PartParams: $5,
+				Location:   -1,
+			}
+		}
+	;
+
+part_params:
+	part_elem
+		{ $$ = makeList($1) }
+	| part_params ',' part_elem
+		{ $$ = appendList($1, $3) }
+	;
+
+part_elem:
+	ColId opt_collate opt_qualified_name
+		{
+			$$ = &nodes.PartitionElem{
+				Name:      $1,
+				Collation: $2,
+				Opclass:   $3,
+				Location:  -1,
+			}
+		}
+	| func_expr_windowless opt_collate opt_qualified_name
+		{
+			$$ = &nodes.PartitionElem{
+				Expr:      $1,
+				Collation: $2,
+				Opclass:   $3,
+				Location:  -1,
+			}
+		}
+	| '(' a_expr ')' opt_collate opt_qualified_name
+		{
+			$$ = &nodes.PartitionElem{
+				Expr:      $2,
+				Collation: $4,
+				Opclass:   $5,
+				Location:  -1,
+			}
+		}
+	;
+
+opt_collate:
+	COLLATE any_name	{ $$ = $2 }
+	| /* EMPTY */		{ $$ = nil }
+	;
+
+ForValues:
+	PartitionBoundSpec	{ $$ = $1 }
+	| DEFAULT
+		{
+			$$ = &nodes.PartitionBoundSpec{
+				IsDefault: true,
+				Location:  -1,
+			}
+		}
+	;
+
+PartitionBoundSpec:
+	/* a LIST partition */
+	FOR VALUES IN_P '(' expr_list ')'
+		{
+			$$ = &nodes.PartitionBoundSpec{
+				Strategy:   'l',
+				Listdatums: $5,
+				Location:   -1,
+			}
+		}
+	/* a RANGE partition */
+	| FOR VALUES FROM '(' expr_list ')' TO '(' expr_list ')'
+		{
+			$$ = &nodes.PartitionBoundSpec{
+				Strategy:    'r',
+				Lowerdatums: $5,
+				Upperdatums: $9,
+				Location:    -1,
+			}
+		}
+	/* a HASH partition */
+	| FOR VALUES WITH '(' hash_partbound ')'
+		{
+			$$ = $5.(*nodes.PartitionBoundSpec)
+		}
+	;
+
+hash_partbound:
+	hash_partbound_elem ',' hash_partbound_elem
+		{
+			n := $1.(*nodes.PartitionBoundSpec)
+			n2 := $3.(*nodes.PartitionBoundSpec)
+			if n.Modulus != 0 {
+				n.Remainder = n2.Remainder
+			} else {
+				n.Modulus = n2.Modulus
+			}
+			n.Strategy = 'h'
+			n.Location = -1
+			$$ = n
+		}
+	;
+
+hash_partbound_elem:
+	NonReservedWord Iconst
+		{
+			n := &nodes.PartitionBoundSpec{}
+			switch $1 {
+			case "modulus":
+				n.Modulus = int($2)
+			case "remainder":
+				n.Remainder = int($2)
+			}
+			$$ = n
+		}
+	;
+
 OptTableElementList:
 	TableElementList { $$ = $1 }
 	| /* EMPTY */ { $$ = nil }
+	;
+
+OptTypedTableElementList:
+	'(' TypedTableElementList ')' { $$ = $2 }
+	| /* EMPTY */ { $$ = nil }
+	;
+
+TypedTableElementList:
+	TypedTableElement
+		{ $$ = makeList($1) }
+	| TypedTableElementList ',' TypedTableElement
+		{ $$ = appendList($1, $3) }
+	;
+
+TypedTableElement:
+	columnOptions { $$ = $1 }
+	| TableConstraint { $$ = $1 }
+	;
+
+columnOptions:
+	ColId opt_column_constraints
+		{
+			n := &nodes.ColumnDef{
+				Colname:     $1,
+				TypeName:    nil,
+				IsLocal:     true,
+				Location:    -1,
+			}
+			splitColQualList($2, n)
+			$$ = n
+		}
+	| ColId WITH OPTIONS opt_column_constraints
+		{
+			n := &nodes.ColumnDef{
+				Colname:     $1,
+				TypeName:    nil,
+				IsLocal:     true,
+				Location:    -1,
+			}
+			splitColQualList($4, n)
+			$$ = n
+		}
 	;
 
 TableElementList:
@@ -1250,18 +1711,60 @@ TableElementList:
 TableElement:
 	columnDef { $$ = $1 }
 	| TableConstraint { $$ = $1 }
+	| TableLikeClause { $$ = $1 }
+	;
+
+TableLikeClause:
+	LIKE qualified_name
+		{
+			$$ = &nodes.TableLikeClause{
+				Relation: makeRangeVar($2).(*nodes.RangeVar),
+			}
+		}
+	| LIKE qualified_name TableLikeOptionList
+		{
+			$$ = &nodes.TableLikeClause{
+				Relation: makeRangeVar($2).(*nodes.RangeVar),
+				Options:  uint32($3),
+			}
+		}
+	;
+
+TableLikeOptionList:
+	TableLikeOptionList INCLUDING TableLikeOption
+		{ $$ = $1 | $3 }
+	| TableLikeOptionList EXCLUDING TableLikeOption
+		{ $$ = $1 &^ $3 }
+	| INCLUDING TableLikeOption
+		{ $$ = $2 }
+	| EXCLUDING TableLikeOption
+		{ $$ = 0 &^ $2 }
+	;
+
+TableLikeOption:
+	ALL				{ $$ = 0xFFFFFFFF }
+	| COMMENTS		{ $$ = 1 }
+	| COMPRESSION	{ $$ = 2 }
+	| CONSTRAINTS	{ $$ = 4 }
+	| DEFAULTS		{ $$ = 8 }
+	| GENERATED		{ $$ = 16 }
+	| IDENTITY_P	{ $$ = 32 }
+	| INDEXES		{ $$ = 64 }
+	| STATISTICS	{ $$ = 128 }
+	| STORAGE		{ $$ = 256 }
 	;
 
 columnDef:
 	ColId Typename opt_column_constraints
 		{
-			$$ = &nodes.ColumnDef{
+			n := &nodes.ColumnDef{
 				Colname:     $1,
 				TypeName:    $2,
-				Constraints: $3,
 				IsLocal:     true,
 				Location:    -1,
 			}
+			splitColQualList($3, n)
+			$$ = n
 		}
 	;
 
@@ -1285,6 +1788,70 @@ ColConstraint:
 			$$ = n
 		}
 	| ColConstraintElem { $$ = $1 }
+	| COLLATE any_name
+		{
+			$$ = &nodes.CollateClause{
+				Collname: $2,
+				Location: -1,
+			}
+		}
+	| COMPRESSION ColId
+		{
+			/* COMPRESSION is stored directly on ColumnDef, use DefElem as carrier */
+			$$ = &nodes.DefElem{
+				Defname: "compression",
+				Arg:     &nodes.String{Str: $2},
+			}
+		}
+	| STORAGE ColId
+		{
+			/* STORAGE is stored directly on ColumnDef, use DefElem as carrier */
+			$$ = &nodes.DefElem{
+				Defname: "storage",
+				Arg:     &nodes.String{Str: $2},
+			}
+		}
+	| OPTIONS '(' generic_option_list ')'
+		{
+			/* OPTIONS for foreign table columns */
+			$$ = &nodes.DefElem{
+				Defname: "fdwoptions",
+				Arg:     $3,
+			}
+		}
+	| ConstraintAttr
+		{ $$ = $1 }
+	;
+
+ConstraintAttr:
+	DEFERRABLE
+		{
+			$$ = &nodes.Constraint{
+				Contype:  nodes.CONSTR_ATTR_DEFERRABLE,
+				Location: -1,
+			}
+		}
+	| NOT DEFERRABLE
+		{
+			$$ = &nodes.Constraint{
+				Contype:  nodes.CONSTR_ATTR_NOT_DEFERRABLE,
+				Location: -1,
+			}
+		}
+	| INITIALLY DEFERRED
+		{
+			$$ = &nodes.Constraint{
+				Contype:  nodes.CONSTR_ATTR_DEFERRED,
+				Location: -1,
+			}
+		}
+	| INITIALLY IMMEDIATE
+		{
+			$$ = &nodes.Constraint{
+				Contype:  nodes.CONSTR_ATTR_IMMEDIATE,
+				Location: -1,
+			}
+		}
 	;
 
 ColConstraintElem:
@@ -1302,27 +1869,34 @@ ColConstraintElem:
 				Location: -1,
 			}
 		}
-	| UNIQUE
+	| UNIQUE opt_unique_null_treatment opt_definition OptConsTableSpace
 		{
 			$$ = &nodes.Constraint{
-				Contype:  nodes.CONSTR_UNIQUE,
-				Location: -1,
+				Contype:           nodes.CONSTR_UNIQUE,
+				NullsNotDistinct:  $2,
+				Options:           $3,
+				Indexspace:        $4,
+				Location:          -1,
 			}
 		}
-	| PRIMARY KEY
+	| PRIMARY KEY opt_definition OptConsTableSpace
 		{
 			$$ = &nodes.Constraint{
-				Contype:  nodes.CONSTR_PRIMARY,
-				Location: -1,
+				Contype:    nodes.CONSTR_PRIMARY,
+				Options:    $3,
+				Indexspace:  $4,
+				Location:   -1,
 			}
 		}
-	| CHECK '(' a_expr ')'
+	| CHECK '(' a_expr ')' no_inherit
 		{
-			$$ = &nodes.Constraint{
+			n := &nodes.Constraint{
 				Contype:  nodes.CONSTR_CHECK,
 				RawExpr:  $3,
 				Location: -1,
 			}
+			n.IsNoInherit = $5
+			$$ = n
 		}
 	| DEFAULT b_expr
 		{
@@ -1332,15 +1906,94 @@ ColConstraintElem:
 				Location: -1,
 			}
 		}
-	| REFERENCES qualified_name opt_column_list
+	| REFERENCES qualified_name opt_column_list key_match key_actions ConstraintAttributeSpec
 		{
 			rv := makeRangeVar($2)
-			$$ = &nodes.Constraint{
-				Contype:  nodes.CONSTR_FOREIGN,
-				Pktable:  rv.(*nodes.RangeVar),
-				PkAttrs:  $3,
-				Location: -1,
+			n := &nodes.Constraint{
+				Contype:      nodes.CONSTR_FOREIGN,
+				Pktable:      rv.(*nodes.RangeVar),
+				PkAttrs:      $3,
+				FkMatchtype:  byte($4),
+				FkUpdaction:  byte($5 >> 8),
+				FkDelaction:  byte($5 & 0xFF),
+				Location:     -1,
+				InitiallyValid: true,
 			}
+			applyConstraintAttrs(n, $6)
+			$$ = n
+		}
+	| GENERATED ALWAYS AS IDENTITY_P OptParenthesizedSeqOptList
+		{
+			$$ = &nodes.Constraint{
+				Contype:       nodes.CONSTR_IDENTITY,
+				GeneratedWhen: 'a',
+				Options:       $5,
+				Location:      -1,
+			}
+		}
+	| GENERATED BY DEFAULT AS IDENTITY_P OptParenthesizedSeqOptList
+		{
+			$$ = &nodes.Constraint{
+				Contype:       nodes.CONSTR_IDENTITY,
+				GeneratedWhen: 'd',
+				Options:       $6,
+				Location:      -1,
+			}
+		}
+	| GENERATED ALWAYS AS '(' a_expr ')' STORED
+		{
+			$$ = &nodes.Constraint{
+				Contype:       nodes.CONSTR_GENERATED,
+				GeneratedWhen: 'a',
+				RawExpr:       $5,
+				Location:      -1,
+			}
+		}
+	| GENERATED BY DEFAULT AS '(' a_expr ')' STORED
+		{
+			$$ = &nodes.Constraint{
+				Contype:       nodes.CONSTR_GENERATED,
+				GeneratedWhen: 'd',
+				RawExpr:       $6,
+				Location:      -1,
+			}
+		}
+	;
+
+DomainConstraint:
+	CONSTRAINT name DomainConstraintElem
+		{
+			n := $3.(*nodes.Constraint)
+			n.Conname = $2
+			$$ = n
+		}
+	| DomainConstraintElem
+		{
+			$$ = $1
+		}
+	;
+
+DomainConstraintElem:
+	CHECK '(' a_expr ')' ConstraintAttributeSpec
+		{
+			n := &nodes.Constraint{
+				Contype:        nodes.CONSTR_CHECK,
+				RawExpr:        $3,
+				Location:       -1,
+				InitiallyValid: true,
+			}
+			applyConstraintAttrs(n, $5)
+			$$ = n
+		}
+	| NOT NULL_P ConstraintAttributeSpec
+		{
+			n := &nodes.Constraint{
+				Contype:        nodes.CONSTR_NOTNULL,
+				Location:       -1,
+				InitiallyValid: true,
+			}
+			applyConstraintAttrs(n, $3)
+			$$ = n
 		}
 	;
 
@@ -1358,40 +2011,100 @@ TableConstraint:
 	;
 
 ConstraintElem:
-	UNIQUE '(' columnList ')'
+	UNIQUE opt_unique_null_treatment '(' columnList ')' opt_c_include opt_definition OptConsTableSpace ConstraintAttributeSpec
 		{
-			$$ = &nodes.Constraint{
-				Contype:  nodes.CONSTR_UNIQUE,
-				Keys:     $3,
-				Location: -1,
+			n := &nodes.Constraint{
+				Contype:          nodes.CONSTR_UNIQUE,
+				NullsNotDistinct: $2,
+				Keys:             $4,
+				Including:        $6,
+				Options:          $7,
+				Indexspace:       $8,
+				Location:         -1,
+				InitiallyValid:   true,
 			}
+			applyConstraintAttrs(n, $9)
+			$$ = n
 		}
-	| PRIMARY KEY '(' columnList ')'
+	| UNIQUE ExistingIndex ConstraintAttributeSpec
 		{
-			$$ = &nodes.Constraint{
-				Contype:  nodes.CONSTR_PRIMARY,
-				Keys:     $4,
-				Location: -1,
+			n := &nodes.Constraint{
+				Contype:    nodes.CONSTR_UNIQUE,
+				Indexname:  $2,
+				Location:   -1,
+				InitiallyValid: true,
 			}
+			applyConstraintAttrs(n, $3)
+			$$ = n
 		}
-	| CHECK '(' a_expr ')'
+	| PRIMARY KEY '(' columnList ')' opt_c_include opt_definition OptConsTableSpace ConstraintAttributeSpec
 		{
-			$$ = &nodes.Constraint{
+			n := &nodes.Constraint{
+				Contype:    nodes.CONSTR_PRIMARY,
+				Keys:       $4,
+				Including:  $6,
+				Options:    $7,
+				Indexspace:  $8,
+				Location:   -1,
+				InitiallyValid: true,
+			}
+			applyConstraintAttrs(n, $9)
+			$$ = n
+		}
+	| PRIMARY KEY ExistingIndex ConstraintAttributeSpec
+		{
+			n := &nodes.Constraint{
+				Contype:    nodes.CONSTR_PRIMARY,
+				Indexname:  $3,
+				Location:   -1,
+				InitiallyValid: true,
+			}
+			applyConstraintAttrs(n, $4)
+			$$ = n
+		}
+	| CHECK '(' a_expr ')' ConstraintAttributeSpec
+		{
+			n := &nodes.Constraint{
 				Contype:  nodes.CONSTR_CHECK,
 				RawExpr:  $3,
 				Location: -1,
+				InitiallyValid: true,
 			}
+			applyConstraintAttrs(n, $5)
+			$$ = n
 		}
-	| FOREIGN KEY '(' columnList ')' REFERENCES qualified_name opt_column_list
+	| FOREIGN KEY '(' columnList ')' REFERENCES qualified_name opt_column_list key_match key_actions ConstraintAttributeSpec
 		{
 			rv := makeRangeVar($7)
-			$$ = &nodes.Constraint{
-				Contype:  nodes.CONSTR_FOREIGN,
-				FkAttrs:  $4,
-				Pktable:  rv.(*nodes.RangeVar),
-				PkAttrs:  $8,
-				Location: -1,
+			n := &nodes.Constraint{
+				Contype:      nodes.CONSTR_FOREIGN,
+				FkAttrs:      $4,
+				Pktable:      rv.(*nodes.RangeVar),
+				PkAttrs:      $8,
+				FkMatchtype:  byte($9),
+				FkUpdaction:  byte($10 >> 8),
+				FkDelaction:  byte($10 & 0xFF),
+				Location:     -1,
+				InitiallyValid: true,
 			}
+			applyConstraintAttrs(n, $11)
+			$$ = n
+		}
+	| EXCLUDE access_method_clause '(' ExclusionConstraintList ')' opt_c_include opt_definition OptConsTableSpace where_clause ConstraintAttributeSpec
+		{
+			n := &nodes.Constraint{
+				Contype:        nodes.CONSTR_EXCLUSION,
+				AccessMethod:   $2,
+				Exclusions:     $4,
+				Including:      $6,
+				Options:        $7,
+				Indexspace:      $8,
+				WhereClause:    $9,
+				Location:       -1,
+				InitiallyValid: true,
+			}
+			applyConstraintAttrs(n, $10)
+			$$ = n
 		}
 	;
 
@@ -1405,6 +2118,77 @@ columnList:
 		{ $$ = makeList(&nodes.String{Str: $1}) }
 	| columnList ',' name
 		{ $$ = appendList($1, &nodes.String{Str: $3}) }
+	;
+
+key_match:
+	MATCH FULL     { $$ = int64('f') }
+	| MATCH PARTIAL
+		{
+			/* PARTIAL is not implemented */
+			$$ = int64('p')
+		}
+	| MATCH SIMPLE { $$ = int64('s') }
+	| /* EMPTY */  { $$ = int64('s') }
+	;
+
+/*
+ * key_actions packs update and delete actions into one int64:
+ * high byte = update action, low byte = delete action
+ */
+key_actions:
+	key_update                  { $$ = ($1 << 8) | int64('a') }
+	| key_delete                { $$ = (int64('a') << 8) | $1 }
+	| key_update key_delete     { $$ = ($1 << 8) | $2 }
+	| key_delete key_update     { $$ = ($2 << 8) | $1 }
+	| /* EMPTY */               { $$ = (int64('a') << 8) | int64('a') }
+	;
+
+key_update:
+	ON UPDATE key_action { $$ = $3 }
+	;
+
+key_delete:
+	ON DELETE_P key_action { $$ = $3 }
+	;
+
+key_action:
+	NO ACTION                   { $$ = int64('a') }
+	| RESTRICT                  { $$ = int64('r') }
+	| CASCADE                   { $$ = int64('c') }
+	| SET NULL_P opt_column_list    { $$ = int64('n') }
+	| SET DEFAULT opt_column_list   { $$ = int64('d') }
+	;
+
+opt_c_include:
+	INCLUDE '(' columnList ')'  { $$ = $3 }
+	| /* EMPTY */               { $$ = nil }
+	;
+
+OptConsTableSpace:
+	USING INDEX TABLESPACE name { $$ = $4 }
+	| /* EMPTY */               { $$ = "" }
+	;
+
+ExistingIndex:
+	USING INDEX name { $$ = $3 }
+	;
+
+ExclusionConstraintList:
+	ExclusionConstraintElem
+		{ $$ = makeList($1) }
+	| ExclusionConstraintList ',' ExclusionConstraintElem
+		{ $$ = appendList($1, $3) }
+	;
+
+ExclusionConstraintElem:
+	index_elem WITH any_operator
+		{
+			$$ = &nodes.List{Items: []nodes.Node{$1, $3}}
+		}
+	| index_elem WITH OPERATOR '(' any_operator ')'
+		{
+			$$ = &nodes.List{Items: []nodes.Node{$1, $5}}
+		}
 	;
 
 /*****************************************************************************
@@ -1429,6 +2213,173 @@ AlterTableStmt:
 				Cmds:       $6,
 				ObjType:    int(nodes.OBJECT_TABLE),
 				Missing_ok: true,
+			}
+		}
+	| ALTER INDEX qualified_name alter_table_cmds
+		{
+			rv := makeRangeVarFromAnyName($3)
+			$$ = &nodes.AlterTableStmt{
+				Relation: rv,
+				Cmds:     $4,
+				ObjType:  int(nodes.OBJECT_INDEX),
+			}
+		}
+	| ALTER INDEX IF_P EXISTS qualified_name alter_table_cmds
+		{
+			rv := makeRangeVarFromAnyName($5)
+			$$ = &nodes.AlterTableStmt{
+				Relation:   rv,
+				Cmds:       $6,
+				ObjType:    int(nodes.OBJECT_INDEX),
+				Missing_ok: true,
+			}
+		}
+	| ALTER INDEX qualified_name ATTACH PARTITION qualified_name
+		{
+			rvIdx := makeRangeVarFromAnyName($3)
+			rvPart := makeRangeVar($6)
+			cmd := &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_AttachPartition),
+				Def:     &nodes.PartitionCmd{
+					Name: rvPart.(*nodes.RangeVar),
+				},
+			}
+			$$ = &nodes.AlterTableStmt{
+				Relation: rvIdx,
+				Cmds:     makeList(cmd),
+				ObjType:  int(nodes.OBJECT_INDEX),
+			}
+		}
+	| ALTER SEQUENCE qualified_name alter_table_cmds
+		{
+			rv := makeRangeVarFromAnyName($3)
+			$$ = &nodes.AlterTableStmt{
+				Relation: rv,
+				Cmds:     $4,
+				ObjType:  int(nodes.OBJECT_SEQUENCE),
+			}
+		}
+	| ALTER SEQUENCE IF_P EXISTS qualified_name alter_table_cmds
+		{
+			rv := makeRangeVarFromAnyName($5)
+			$$ = &nodes.AlterTableStmt{
+				Relation:   rv,
+				Cmds:       $6,
+				ObjType:    int(nodes.OBJECT_SEQUENCE),
+				Missing_ok: true,
+			}
+		}
+	| ALTER VIEW qualified_name alter_table_cmds
+		{
+			rv := makeRangeVarFromAnyName($3)
+			$$ = &nodes.AlterTableStmt{
+				Relation: rv,
+				Cmds:     $4,
+				ObjType:  int(nodes.OBJECT_VIEW),
+			}
+		}
+	| ALTER VIEW IF_P EXISTS qualified_name alter_table_cmds
+		{
+			rv := makeRangeVarFromAnyName($5)
+			$$ = &nodes.AlterTableStmt{
+				Relation:   rv,
+				Cmds:       $6,
+				ObjType:    int(nodes.OBJECT_VIEW),
+				Missing_ok: true,
+			}
+		}
+	| ALTER MATERIALIZED VIEW qualified_name alter_table_cmds
+		{
+			rv := makeRangeVarFromAnyName($4)
+			$$ = &nodes.AlterTableStmt{
+				Relation: rv,
+				Cmds:     $5,
+				ObjType:  int(nodes.OBJECT_MATVIEW),
+			}
+		}
+	| ALTER MATERIALIZED VIEW IF_P EXISTS qualified_name alter_table_cmds
+		{
+			rv := makeRangeVarFromAnyName($6)
+			$$ = &nodes.AlterTableStmt{
+				Relation:   rv,
+				Cmds:       $7,
+				ObjType:    int(nodes.OBJECT_MATVIEW),
+				Missing_ok: true,
+			}
+		}
+	| ALTER FOREIGN TABLE relation_expr alter_table_cmds
+		{
+			$$ = &nodes.AlterTableStmt{
+				Relation: $4.(*nodes.RangeVar),
+				Cmds:     $5,
+				ObjType:  int(nodes.OBJECT_FOREIGN_TABLE),
+			}
+		}
+	| ALTER FOREIGN TABLE IF_P EXISTS relation_expr alter_table_cmds
+		{
+			$$ = &nodes.AlterTableStmt{
+				Relation:   $6.(*nodes.RangeVar),
+				Cmds:       $7,
+				ObjType:    int(nodes.OBJECT_FOREIGN_TABLE),
+				Missing_ok: true,
+			}
+		}
+	/* ALTER TABLE ALL IN TABLESPACE ... SET TABLESPACE ... */
+	| ALTER TABLE ALL IN_P TABLESPACE name SET TABLESPACE name opt_nowait
+		{
+			$$ = &nodes.AlterTableMoveAllStmt{
+				OrigTablespacename: $6,
+				ObjType:            int(nodes.OBJECT_TABLE),
+				NewTablespacename:  $9,
+				Nowait:             $10,
+			}
+		}
+	| ALTER TABLE ALL IN_P TABLESPACE name OWNED BY role_list SET TABLESPACE name opt_nowait
+		{
+			$$ = &nodes.AlterTableMoveAllStmt{
+				OrigTablespacename: $6,
+				ObjType:            int(nodes.OBJECT_TABLE),
+				Roles:              $9,
+				NewTablespacename:  $12,
+				Nowait:             $13,
+			}
+		}
+	| ALTER INDEX ALL IN_P TABLESPACE name SET TABLESPACE name opt_nowait
+		{
+			$$ = &nodes.AlterTableMoveAllStmt{
+				OrigTablespacename: $6,
+				ObjType:            int(nodes.OBJECT_INDEX),
+				NewTablespacename:  $9,
+				Nowait:             $10,
+			}
+		}
+	| ALTER INDEX ALL IN_P TABLESPACE name OWNED BY role_list SET TABLESPACE name opt_nowait
+		{
+			$$ = &nodes.AlterTableMoveAllStmt{
+				OrigTablespacename: $6,
+				ObjType:            int(nodes.OBJECT_INDEX),
+				Roles:              $9,
+				NewTablespacename:  $12,
+				Nowait:             $13,
+			}
+		}
+	| ALTER MATERIALIZED VIEW ALL IN_P TABLESPACE name SET TABLESPACE name opt_nowait
+		{
+			$$ = &nodes.AlterTableMoveAllStmt{
+				OrigTablespacename: $7,
+				ObjType:            int(nodes.OBJECT_MATVIEW),
+				NewTablespacename:  $10,
+				Nowait:             $11,
+			}
+		}
+	| ALTER MATERIALIZED VIEW ALL IN_P TABLESPACE name OWNED BY role_list SET TABLESPACE name opt_nowait
+		{
+			$$ = &nodes.AlterTableMoveAllStmt{
+				OrigTablespacename: $7,
+				ObjType:            int(nodes.OBJECT_MATVIEW),
+				Roles:              $10,
+				NewTablespacename:  $13,
+				Nowait:             $14,
 			}
 		}
 	;
@@ -1509,10 +2460,11 @@ alter_table_cmd:
 				Name:    $3,
 			}
 		}
-	| ALTER COLUMN ColId TYPE_P Typename
+	| ALTER COLUMN ColId TYPE_P Typename opt_collate_clause
 		{
-			coldef := &nodes.ColumnDef{
-				TypeName: $5,
+			coldef := &nodes.ColumnDef{TypeName: $5}
+			if $6 != nil {
+				coldef.CollClause = $6.(*nodes.CollateClause)
 			}
 			$$ = &nodes.AlterTableCmd{
 				Subtype: int(nodes.AT_AlterColumnType),
@@ -1551,12 +2503,697 @@ alter_table_cmd:
 				Newowner: $3.(*nodes.RoleSpec),
 			}
 		}
+	/* ALTER COLUMN ... TYPE ... USING */
+	| ALTER COLUMN ColId SET DATA_P TYPE_P Typename opt_collate_clause
+		{
+			coldef := &nodes.ColumnDef{TypeName: $7}
+			if $8 != nil {
+				coldef.CollClause = $8.(*nodes.CollateClause)
+			}
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_AlterColumnType),
+				Name:    $3,
+				Def:     coldef,
+			}
+		}
+	| ALTER COLUMN ColId TYPE_P Typename opt_collate_clause USING a_expr
+		{
+			coldef := &nodes.ColumnDef{TypeName: $5}
+			if $6 != nil {
+				coldef.CollClause = $6.(*nodes.CollateClause)
+			}
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_AlterColumnType),
+				Name:    $3,
+				Def:     coldef,
+			}
+		}
+	| ALTER COLUMN ColId SET DATA_P TYPE_P Typename opt_collate_clause USING a_expr
+		{
+			coldef := &nodes.ColumnDef{TypeName: $7}
+			if $8 != nil {
+				coldef.CollClause = $8.(*nodes.CollateClause)
+			}
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_AlterColumnType),
+				Name:    $3,
+				Def:     coldef,
+			}
+		}
+	| ALTER ColId TYPE_P Typename opt_collate_clause
+		{
+			coldef := &nodes.ColumnDef{TypeName: $4}
+			if $5 != nil {
+				coldef.CollClause = $5.(*nodes.CollateClause)
+			}
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_AlterColumnType),
+				Name:    $2,
+				Def:     coldef,
+			}
+		}
+	| ALTER ColId SET DATA_P TYPE_P Typename opt_collate_clause
+		{
+			coldef := &nodes.ColumnDef{TypeName: $6}
+			if $7 != nil {
+				coldef.CollClause = $7.(*nodes.CollateClause)
+			}
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_AlterColumnType),
+				Name:    $2,
+				Def:     coldef,
+			}
+		}
+	| ALTER ColId SET DATA_P TYPE_P Typename opt_collate_clause USING a_expr
+		{
+			coldef := &nodes.ColumnDef{TypeName: $6}
+			if $7 != nil {
+				coldef.CollClause = $7.(*nodes.CollateClause)
+			}
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_AlterColumnType),
+				Name:    $2,
+				Def:     coldef,
+			}
+		}
+	| ALTER ColId SET DEFAULT a_expr
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_ColumnDefault),
+				Name:    $2,
+				Def:     $5,
+			}
+		}
+	| ALTER ColId DROP DEFAULT
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_ColumnDefault),
+				Name:    $2,
+			}
+		}
+	| ALTER ColId SET NOT NULL_P
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_SetNotNull),
+				Name:    $2,
+			}
+		}
+	| ALTER ColId DROP NOT NULL_P
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_DropNotNull),
+				Name:    $2,
+			}
+		}
+	| ALTER ColId TYPE_P Typename opt_collate_clause USING a_expr
+		{
+			coldef := &nodes.ColumnDef{TypeName: $4}
+			if $5 != nil {
+				coldef.CollClause = $5.(*nodes.CollateClause)
+			}
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_AlterColumnType),
+				Name:    $2,
+				Def:     coldef,
+			}
+		}
+	/* ALTER FOREIGN TABLE <name> ALTER [COLUMN] <colname> OPTIONS */
+	| ALTER COLUMN ColId alter_generic_options
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_AlterColumnGenericOptions),
+				Name:    $3,
+				Def:     $4,
+			}
+		}
+	| ALTER ColId alter_generic_options
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_AlterColumnGenericOptions),
+				Name:    $2,
+				Def:     $3,
+			}
+		}
+	/* VALIDATE CONSTRAINT */
+	| VALIDATE CONSTRAINT name
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_ValidateConstraint),
+				Name:    $3,
+			}
+		}
+	/* ALTER CONSTRAINT */
+	| ALTER CONSTRAINT name ConstraintAttributeSpec
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_AlterConstraint),
+				Name:    $3,
+			}
+		}
+	/* INHERIT / NO INHERIT */
+	| INHERIT qualified_name
+		{
+			rv := makeRangeVar($2)
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_AddInherit),
+				Def:     rv,
+			}
+		}
+	| NO INHERIT qualified_name
+		{
+			rv := makeRangeVar($3)
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_DropInherit),
+				Def:     rv,
+			}
+		}
+	/* ATTACH / DETACH PARTITION */
+	| ATTACH PARTITION qualified_name ForValues
+		{
+			rv := makeRangeVar($3)
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_AttachPartition),
+				Def:     &nodes.PartitionCmd{
+					Name:  rv.(*nodes.RangeVar),
+					Bound: $4,
+				},
+			}
+		}
+	| DETACH PARTITION qualified_name
+		{
+			rv := makeRangeVar($3)
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_DetachPartition),
+				Def:     &nodes.PartitionCmd{
+					Name: rv.(*nodes.RangeVar),
+				},
+			}
+		}
+	| DETACH PARTITION qualified_name CONCURRENTLY
+		{
+			rv := makeRangeVar($3)
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_DetachPartition),
+				Def:     &nodes.PartitionCmd{
+					Name:       rv.(*nodes.RangeVar),
+					Concurrent: true,
+				},
+			}
+		}
+	| DETACH PARTITION qualified_name FINALIZE
+		{
+			rv := makeRangeVar($3)
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_DetachPartitionFinalize),
+				Def:     &nodes.PartitionCmd{
+					Name: rv.(*nodes.RangeVar),
+				},
+			}
+		}
+	/* ENABLE/DISABLE TRIGGER */
+	| ENABLE_P TRIGGER name
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_EnableTrig),
+				Name:    $3,
+			}
+		}
+	| ENABLE_P ALWAYS TRIGGER name
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_EnableAlwaysTrig),
+				Name:    $4,
+			}
+		}
+	| ENABLE_P REPLICA TRIGGER name
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_EnableReplicaTrig),
+				Name:    $4,
+			}
+		}
+	| DISABLE_P TRIGGER name
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_DisableTrig),
+				Name:    $3,
+			}
+		}
+	| ENABLE_P TRIGGER ALL
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_EnableTrigAll),
+			}
+		}
+	| DISABLE_P TRIGGER ALL
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_DisableTrigAll),
+			}
+		}
+	| ENABLE_P TRIGGER USER
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_EnableTrigUser),
+			}
+		}
+	| DISABLE_P TRIGGER USER
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_DisableTrigUser),
+			}
+		}
+	/* ENABLE/DISABLE RULE */
+	| ENABLE_P RULE name
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_EnableRule),
+				Name:    $3,
+			}
+		}
+	| ENABLE_P ALWAYS RULE name
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_EnableAlwaysRule),
+				Name:    $4,
+			}
+		}
+	| ENABLE_P REPLICA RULE name
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_EnableReplicaRule),
+				Name:    $4,
+			}
+		}
+	| DISABLE_P RULE name
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_DisableRule),
+				Name:    $3,
+			}
+		}
+	/* ENABLE/DISABLE/FORCE ROW LEVEL SECURITY */
+	| ENABLE_P ROW LEVEL SECURITY
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_EnableRowSecurity),
+			}
+		}
+	| DISABLE_P ROW LEVEL SECURITY
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_DisableRowSecurity),
+			}
+		}
+	| FORCE ROW LEVEL SECURITY
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_ForceRowSecurity),
+			}
+		}
+	| NO FORCE ROW LEVEL SECURITY
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_NoForceRowSecurity),
+			}
+		}
+	/* CLUSTER ON / SET WITHOUT CLUSTER */
+	| CLUSTER ON name
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_ClusterOn),
+				Name:    $3,
+			}
+		}
+	| SET WITHOUT CLUSTER
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_DropCluster),
+			}
+		}
+	/* SET LOGGED / SET UNLOGGED */
+	| SET LOGGED
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_SetLogged),
+			}
+		}
+	| SET UNLOGGED
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_SetUnLogged),
+			}
+		}
+	/* SET ACCESS METHOD */
+	| SET ACCESS METHOD name
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_SetAccessMethod),
+				Name:    $4,
+			}
+		}
+	| SET ACCESS METHOD DEFAULT
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_SetAccessMethod),
+				Name:    "",
+			}
+		}
+	/* SET/RESET storage params */
+	| SET reloptions
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_SetRelOptions),
+				Def:     $2,
+			}
+		}
+	| RESET reloptions
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_ResetRelOptions),
+				Def:     $2,
+			}
+		}
+	/* ADD COLUMN IF NOT EXISTS (without COLUMN keyword) */
+	| ADD_P IF_P NOT EXISTS columnDef
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype:    int(nodes.AT_AddColumn),
+				Def:        $5,
+				Missing_ok: true,
+			}
+		}
+	/* DROP (without COLUMN keyword) */
+	| DROP ColId opt_drop_behavior
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype:  int(nodes.AT_DropColumn),
+				Name:     $2,
+				Behavior: int($3),
+			}
+		}
+	| DROP IF_P EXISTS ColId opt_drop_behavior
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype:    int(nodes.AT_DropColumn),
+				Name:       $4,
+				Behavior:   int($5),
+				Missing_ok: true,
+			}
+		}
+	/* REPLICA IDENTITY */
+	| REPLICA IDENTITY_P DEFAULT
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_ReplicaIdentity),
+			}
+		}
+	| REPLICA IDENTITY_P FULL
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_ReplicaIdentity),
+			}
+		}
+	| REPLICA IDENTITY_P NOTHING
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_ReplicaIdentity),
+			}
+		}
+	| REPLICA IDENTITY_P USING INDEX name
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_ReplicaIdentity),
+				Name:    $5,
+			}
+		}
+	/* SET STORAGE */
+	| ALTER COLUMN ColId SET STORAGE ColId
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_SetStorage),
+				Name:    $3,
+			}
+		}
+	| ALTER COLUMN ColId SET STORAGE DEFAULT
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_SetStorage),
+				Name:    $3,
+			}
+		}
+	| ALTER ColId SET STORAGE ColId
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_SetStorage),
+				Name:    $2,
+			}
+		}
+	| ALTER ColId SET STORAGE DEFAULT
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_SetStorage),
+				Name:    $2,
+			}
+		}
+	/* SET STATISTICS */
+	| ALTER COLUMN ColId SET STATISTICS SignedIconst
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_SetStatistics),
+				Name:    $3,
+				Def:     makeIntConst($6),
+			}
+		}
+	| ALTER ColId SET STATISTICS SignedIconst
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_SetStatistics),
+				Name:    $2,
+				Def:     makeIntConst($5),
+			}
+		}
+	| ALTER COLUMN Iconst SET STATISTICS SignedIconst
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_SetStatistics),
+				Num:     int16($3),
+				Def:     makeIntConst($6),
+			}
+		}
+	| ALTER Iconst SET STATISTICS SignedIconst
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_SetStatistics),
+				Num:     int16($2),
+				Def:     makeIntConst($5),
+			}
+		}
+	/* SET COMPRESSION */
+	| ALTER COLUMN ColId SET column_compression
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_SetCompression),
+				Name:    $3,
+				Def:     &nodes.String{Str: $5},
+			}
+		}
+	| ALTER ColId SET column_compression
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_SetCompression),
+				Name:    $2,
+				Def:     &nodes.String{Str: $4},
+			}
+		}
+	/* SET/DROP EXPRESSION */
+	| ALTER COLUMN ColId SET EXPRESSION AS '(' a_expr ')'
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_SetExpression),
+				Name:    $3,
+				Def:     $8,
+			}
+		}
+	| ALTER ColId SET EXPRESSION AS '(' a_expr ')'
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_SetExpression),
+				Name:    $2,
+				Def:     $7,
+			}
+		}
+	| ALTER COLUMN ColId DROP EXPRESSION
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_DropExpression),
+				Name:    $3,
+			}
+		}
+	| ALTER COLUMN ColId DROP EXPRESSION IF_P EXISTS
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype:    int(nodes.AT_DropExpression),
+				Name:       $3,
+				Missing_ok: true,
+			}
+		}
+	/* ADD GENERATED IDENTITY */
+	| ALTER COLUMN ColId ADD_P GENERATED ALWAYS AS IDENTITY_P
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_AddIdentity),
+				Name:    $3,
+			}
+		}
+	| ALTER COLUMN ColId ADD_P GENERATED ALWAYS AS IDENTITY_P '(' OptSeqOptList ')'
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_AddIdentity),
+				Name:    $3,
+			}
+		}
+	| ALTER COLUMN ColId ADD_P GENERATED BY DEFAULT AS IDENTITY_P
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_AddIdentity),
+				Name:    $3,
+			}
+		}
+	| ALTER COLUMN ColId ADD_P GENERATED BY DEFAULT AS IDENTITY_P '(' OptSeqOptList ')'
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_AddIdentity),
+				Name:    $3,
+			}
+		}
+	/* DROP/SET IDENTITY */
+	| ALTER COLUMN ColId DROP IDENTITY_P
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_DropIdentity),
+				Name:    $3,
+			}
+		}
+	| ALTER COLUMN ColId DROP IDENTITY_P IF_P EXISTS
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype:    int(nodes.AT_DropIdentity),
+				Name:       $3,
+				Missing_ok: true,
+			}
+		}
+	/* ADD GENERATED identity */
+	| ALTER COLUMN ColId ADD_P GENERATED generated_when AS IDENTITY_P OptParenthesizedSeqOptList
+		{
+			c := &nodes.Constraint{
+				Contype:       nodes.CONSTR_IDENTITY,
+				GeneratedWhen: byte($6),
+				Options:       $9,
+				Location:      -1,
+			}
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_AddIdentity),
+				Name:    $3,
+				Def:     c,
+			}
+		}
+	| ALTER ColId ADD_P GENERATED generated_when AS IDENTITY_P OptParenthesizedSeqOptList
+		{
+			c := &nodes.Constraint{
+				Contype:       nodes.CONSTR_IDENTITY,
+				GeneratedWhen: byte($5),
+				Options:       $8,
+				Location:      -1,
+			}
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_AddIdentity),
+				Name:    $2,
+				Def:     c,
+			}
+		}
+	/* SET GENERATED / identity options */
+	| ALTER COLUMN ColId alter_identity_column_option_list
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_SetIdentity),
+				Name:    $3,
+				Def:     $4,
+			}
+		}
+	/* ALTER COLUMN ... SET (options) / RESET (options) */
+	| ALTER COLUMN ColId SET '(' def_list ')'
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_SetOptions),
+				Name:    $3,
+				Def:     $6,
+			}
+		}
+	| ALTER COLUMN ColId RESET '(' def_list ')'
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_ResetOptions),
+				Name:    $3,
+				Def:     $6,
+			}
+		}
+	/* SET WITH/WITHOUT OIDS (deprecated but still parsed) */
+	| SET WITH OIDS
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_DropOids), /* deprecated, reuse DropOids */
+			}
+		}
+	| SET WITHOUT OIDS
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_DropOids),
+			}
+		}
+	/* SET TABLESPACE */
+	| SET TABLESPACE name
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_SetTableSpace),
+				Name:    $3,
+			}
+		}
+	/* OPTIONS for foreign tables */
+	| alter_generic_options
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_GenericOptions),
+				Def:     $1,
+			}
+		}
+	/* OF typename */
+	| OF any_name
+		{
+			tn := makeTypeNameFromNameList($2)
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_AddOf),
+				Def:     tn,
+			}
+		}
+	/* NOT OF */
+	| NOT OF
+		{
+			$$ = &nodes.AlterTableCmd{
+				Subtype: int(nodes.AT_DropOf),
+			}
+		}
 	;
 
 opt_drop_behavior:
 	CASCADE     { $$ = int64(nodes.DROP_CASCADE) }
 	| RESTRICT  { $$ = int64(nodes.DROP_RESTRICT) }
 	| /* EMPTY */ { $$ = int64(nodes.DROP_RESTRICT) }
+	;
+
+column_compression:
+	COMPRESSION ColId      { $$ = $2 }
+	| COMPRESSION DEFAULT  { $$ = "default" }
 	;
 
 /*****************************************************************************
@@ -1613,6 +3250,496 @@ RenameStmt:
 				Newname:      $8,
 			}
 		}
+	| ALTER TABLE IF_P EXISTS relation_expr RENAME COLUMN ColId TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType:   nodes.OBJECT_COLUMN,
+				RelationType: nodes.OBJECT_TABLE,
+				Relation:     $5.(*nodes.RangeVar),
+				Subname:      $8,
+				Newname:      $10,
+				MissingOk:    true,
+			}
+		}
+	| ALTER TABLE IF_P EXISTS relation_expr RENAME ColId TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType:   nodes.OBJECT_COLUMN,
+				RelationType: nodes.OBJECT_TABLE,
+				Relation:     $5.(*nodes.RangeVar),
+				Subname:      $7,
+				Newname:      $9,
+				MissingOk:    true,
+			}
+		}
+	| ALTER TABLE IF_P EXISTS relation_expr RENAME CONSTRAINT name TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType:   nodes.OBJECT_TABCONSTRAINT,
+				RelationType: nodes.OBJECT_TABLE,
+				Relation:     $5.(*nodes.RangeVar),
+				Subname:      $8,
+				Newname:      $10,
+				MissingOk:    true,
+			}
+		}
+	/* RENAME INDEX */
+	| ALTER INDEX qualified_name RENAME TO name
+		{
+			rv := makeRangeVarFromAnyName($3)
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_INDEX,
+				Relation:   rv,
+				Newname:    $6,
+			}
+		}
+	| ALTER INDEX IF_P EXISTS qualified_name RENAME TO name
+		{
+			rv := makeRangeVarFromAnyName($5)
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_INDEX,
+				Relation:   rv,
+				Newname:    $8,
+				MissingOk:  true,
+			}
+		}
+	/* RENAME SEQUENCE */
+	| ALTER SEQUENCE qualified_name RENAME TO name
+		{
+			rv := makeRangeVarFromAnyName($3)
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_SEQUENCE,
+				Relation:   rv,
+				Newname:    $6,
+			}
+		}
+	| ALTER SEQUENCE IF_P EXISTS qualified_name RENAME TO name
+		{
+			rv := makeRangeVarFromAnyName($5)
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_SEQUENCE,
+				Relation:   rv,
+				Newname:    $8,
+				MissingOk:  true,
+			}
+		}
+	/* RENAME VIEW */
+	| ALTER VIEW qualified_name RENAME TO name
+		{
+			rv := makeRangeVarFromAnyName($3)
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_VIEW,
+				Relation:   rv,
+				Newname:    $6,
+			}
+		}
+	| ALTER VIEW IF_P EXISTS qualified_name RENAME TO name
+		{
+			rv := makeRangeVarFromAnyName($5)
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_VIEW,
+				Relation:   rv,
+				Newname:    $8,
+				MissingOk:  true,
+			}
+		}
+	| ALTER VIEW qualified_name RENAME COLUMN ColId TO name
+		{
+			rv := makeRangeVarFromAnyName($3)
+			$$ = &nodes.RenameStmt{
+				RenameType:   nodes.OBJECT_COLUMN,
+				RelationType: nodes.OBJECT_VIEW,
+				Relation:     rv,
+				Subname:      $6,
+				Newname:      $8,
+			}
+		}
+	| ALTER VIEW qualified_name RENAME ColId TO name
+		{
+			rv := makeRangeVarFromAnyName($3)
+			$$ = &nodes.RenameStmt{
+				RenameType:   nodes.OBJECT_COLUMN,
+				RelationType: nodes.OBJECT_VIEW,
+				Relation:     rv,
+				Subname:      $5,
+				Newname:      $7,
+			}
+		}
+	/* RENAME MATERIALIZED VIEW */
+	| ALTER MATERIALIZED VIEW qualified_name RENAME TO name
+		{
+			rv := makeRangeVarFromAnyName($4)
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_MATVIEW,
+				Relation:   rv,
+				Newname:    $7,
+			}
+		}
+	| ALTER MATERIALIZED VIEW IF_P EXISTS qualified_name RENAME TO name
+		{
+			rv := makeRangeVarFromAnyName($6)
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_MATVIEW,
+				Relation:   rv,
+				Newname:    $9,
+				MissingOk:  true,
+			}
+		}
+	| ALTER MATERIALIZED VIEW qualified_name RENAME COLUMN ColId TO name
+		{
+			rv := makeRangeVarFromAnyName($4)
+			$$ = &nodes.RenameStmt{
+				RenameType:   nodes.OBJECT_COLUMN,
+				RelationType: nodes.OBJECT_MATVIEW,
+				Relation:     rv,
+				Subname:      $7,
+				Newname:      $9,
+			}
+		}
+	| ALTER MATERIALIZED VIEW qualified_name RENAME ColId TO name
+		{
+			rv := makeRangeVarFromAnyName($4)
+			$$ = &nodes.RenameStmt{
+				RenameType:   nodes.OBJECT_COLUMN,
+				RelationType: nodes.OBJECT_MATVIEW,
+				Relation:     rv,
+				Subname:      $6,
+				Newname:      $8,
+			}
+		}
+	/* RENAME FUNCTION / PROCEDURE / ROUTINE */
+	| ALTER FUNCTION function_with_argtypes RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_FUNCTION,
+				Object:     $3,
+				Newname:    $6,
+			}
+		}
+	| ALTER PROCEDURE function_with_argtypes RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_PROCEDURE,
+				Object:     $3,
+				Newname:    $6,
+			}
+		}
+	| ALTER ROUTINE function_with_argtypes RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_ROUTINE,
+				Object:     $3,
+				Newname:    $6,
+			}
+		}
+	/* RENAME AGGREGATE */
+	| ALTER AGGREGATE aggregate_with_argtypes RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_AGGREGATE,
+				Object:     $3,
+				Newname:    $6,
+			}
+		}
+	/* RENAME COLLATION */
+	| ALTER COLLATION any_name RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_COLLATION,
+				Object:     $3,
+				Newname:    $6,
+			}
+		}
+	/* RENAME CONVERSION */
+	| ALTER CONVERSION_P any_name RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_CONVERSION,
+				Object:     $3,
+				Newname:    $6,
+			}
+		}
+	/* RENAME DOMAIN */
+	| ALTER DOMAIN_P any_name RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_DOMAIN,
+				Object:     $3,
+				Newname:    $6,
+			}
+		}
+	| ALTER DOMAIN_P any_name RENAME CONSTRAINT name TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType:   nodes.OBJECT_DOMCONSTRAINT,
+				Object:       $3,
+				Subname:      $6,
+				Newname:      $8,
+			}
+		}
+	/* RENAME SCHEMA */
+	| ALTER SCHEMA name RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_SCHEMA,
+				Subname:    $3,
+				Newname:    $6,
+			}
+		}
+	/* RENAME SERVER */
+	| ALTER SERVER name RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_FOREIGN_SERVER,
+				Object:     &nodes.String{Str: $3},
+				Newname:    $6,
+			}
+		}
+	/* RENAME FOREIGN DATA WRAPPER */
+	| ALTER FOREIGN DATA_P WRAPPER name RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_FDW,
+				Object:     &nodes.String{Str: $5},
+				Newname:    $8,
+			}
+		}
+	/* RENAME TYPE */
+	| ALTER TYPE_P any_name RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_TYPE,
+				Object:     $3,
+				Newname:    $6,
+			}
+		}
+	| ALTER TYPE_P any_name RENAME ATTRIBUTE name TO name opt_drop_behavior
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType:   nodes.OBJECT_ATTRIBUTE,
+				RelationType: nodes.OBJECT_TYPE,
+				Relation:     makeRangeVarFromAnyName($3),
+				Subname:      $6,
+				Newname:      $8,
+				Behavior:     nodes.DropBehavior($9),
+			}
+		}
+	/* RENAME FOREIGN TABLE */
+	| ALTER FOREIGN TABLE relation_expr RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_FOREIGN_TABLE,
+				Relation:   $4.(*nodes.RangeVar),
+				Newname:    $7,
+			}
+		}
+	| ALTER FOREIGN TABLE IF_P EXISTS relation_expr RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_FOREIGN_TABLE,
+				Relation:   $6.(*nodes.RangeVar),
+				Newname:    $9,
+				MissingOk:  true,
+			}
+		}
+	| ALTER FOREIGN TABLE relation_expr RENAME COLUMN ColId TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType:   nodes.OBJECT_COLUMN,
+				RelationType: nodes.OBJECT_FOREIGN_TABLE,
+				Relation:     $4.(*nodes.RangeVar),
+				Subname:      $7,
+				Newname:      $9,
+			}
+		}
+	| ALTER FOREIGN TABLE relation_expr RENAME ColId TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType:   nodes.OBJECT_COLUMN,
+				RelationType: nodes.OBJECT_FOREIGN_TABLE,
+				Relation:     $4.(*nodes.RangeVar),
+				Subname:      $6,
+				Newname:      $8,
+			}
+		}
+	| ALTER FOREIGN TABLE IF_P EXISTS relation_expr RENAME COLUMN ColId TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType:   nodes.OBJECT_COLUMN,
+				RelationType: nodes.OBJECT_FOREIGN_TABLE,
+				Relation:     $6.(*nodes.RangeVar),
+				Subname:      $9,
+				Newname:      $11,
+				MissingOk:    true,
+			}
+		}
+	| ALTER FOREIGN TABLE IF_P EXISTS relation_expr RENAME ColId TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType:   nodes.OBJECT_COLUMN,
+				RelationType: nodes.OBJECT_FOREIGN_TABLE,
+				Relation:     $6.(*nodes.RangeVar),
+				Subname:      $8,
+				Newname:      $10,
+				MissingOk:    true,
+			}
+		}
+	/* RENAME OPERATOR CLASS / FAMILY */
+	| ALTER OPERATOR CLASS any_name USING name RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_OPCLASS,
+				Object:     prependList(&nodes.String{Str: $6}, $4),
+				Newname:    $9,
+			}
+		}
+	| ALTER OPERATOR FAMILY any_name USING name RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_OPFAMILY,
+				Object:     prependList(&nodes.String{Str: $6}, $4),
+				Newname:    $9,
+			}
+		}
+	/* RENAME TEXT SEARCH */
+	| ALTER TEXT_P SEARCH PARSER any_name RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_TSPARSER,
+				Object:     $5,
+				Newname:    $8,
+			}
+		}
+	| ALTER TEXT_P SEARCH DICTIONARY any_name RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_TSDICTIONARY,
+				Object:     $5,
+				Newname:    $8,
+			}
+		}
+	| ALTER TEXT_P SEARCH TEMPLATE any_name RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_TSTEMPLATE,
+				Object:     $5,
+				Newname:    $8,
+			}
+		}
+	| ALTER TEXT_P SEARCH CONFIGURATION any_name RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_TSCONFIGURATION,
+				Object:     $5,
+				Newname:    $8,
+			}
+		}
+	/* RENAME PUBLICATION / SUBSCRIPTION */
+	| ALTER PUBLICATION name RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_PUBLICATION,
+				Object:     &nodes.String{Str: $3},
+				Newname:    $6,
+			}
+		}
+	| ALTER SUBSCRIPTION name RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_SUBSCRIPTION,
+				Object:     &nodes.String{Str: $3},
+				Newname:    $6,
+			}
+		}
+	/* RENAME RULE */
+	| ALTER RULE name ON qualified_name RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_RULE,
+				Relation:   makeRangeVarFromAnyName($5),
+				Subname:    $3,
+				Newname:    $8,
+			}
+		}
+	/* RENAME TRIGGER */
+	| ALTER TRIGGER name ON qualified_name RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_TRIGGER,
+				Relation:   makeRangeVarFromAnyName($5),
+				Subname:    $3,
+				Newname:    $8,
+			}
+		}
+	/* RENAME EVENT TRIGGER */
+	| ALTER EVENT TRIGGER name RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_EVENT_TRIGGER,
+				Object:     &nodes.String{Str: $4},
+				Newname:    $7,
+			}
+		}
+	/* RENAME STATISTICS */
+	| ALTER STATISTICS any_name RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_STATISTIC_EXT,
+				Object:     $3,
+				Newname:    $6,
+			}
+		}
+	/* RENAME POLICY */
+	| ALTER POLICY name ON qualified_name RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_POLICY,
+				Relation:   makeRangeVarFromAnyName($5),
+				Subname:    $3,
+				Newname:    $8,
+			}
+		}
+	/* RENAME LANGUAGE / DATABASE / TABLESPACE / ROLE */
+	| ALTER opt_procedural LANGUAGE name RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_LANGUAGE,
+				Object:     &nodes.String{Str: $4},
+				Newname:    $7,
+			}
+		}
+	| ALTER DATABASE name RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_DATABASE,
+				Subname:    $3,
+				Newname:    $6,
+			}
+		}
+	| ALTER TABLESPACE name RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_TABLESPACE,
+				Subname:    $3,
+				Newname:    $6,
+			}
+		}
+	| ALTER ROLE RoleSpec RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_ROLE,
+				Subname:    $3.(*nodes.RoleSpec).Rolename,
+				Newname:    $6,
+			}
+		}
+	| ALTER USER RoleSpec RENAME TO name
+		{
+			$$ = &nodes.RenameStmt{
+				RenameType: nodes.OBJECT_ROLE,
+				Subname:    $3.(*nodes.RoleSpec).Rolename,
+				Newname:    $6,
+			}
+		}
 	;
 
 /*****************************************************************************
@@ -1639,6 +3766,331 @@ DropStmt:
 				Behavior:   int($4),
 			}
 		}
+	/* DROP TYPE / DROP DOMAIN */
+	| DROP TYPE_P any_name_list opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    $3,
+				RemoveType: int(nodes.OBJECT_TYPE),
+				Behavior:   int($4),
+			}
+		}
+	| DROP TYPE_P IF_P EXISTS any_name_list opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    $5,
+				RemoveType: int(nodes.OBJECT_TYPE),
+				Behavior:   int($6),
+				Missing_ok: true,
+			}
+		}
+	| DROP DOMAIN_P any_name_list opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    $3,
+				RemoveType: int(nodes.OBJECT_DOMAIN),
+				Behavior:   int($4),
+			}
+		}
+	| DROP DOMAIN_P IF_P EXISTS any_name_list opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    $5,
+				RemoveType: int(nodes.OBJECT_DOMAIN),
+				Behavior:   int($6),
+				Missing_ok: true,
+			}
+		}
+	/* DROP SCHEMA / EXTENSION / LANGUAGE / PUBLICATION / SUBSCRIPTION */
+	| DROP SCHEMA name_list opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    makeNameListAsAnyNameList($3),
+				RemoveType: int(nodes.OBJECT_SCHEMA),
+				Behavior:   int($4),
+			}
+		}
+	| DROP SCHEMA IF_P EXISTS name_list opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    makeNameListAsAnyNameList($5),
+				RemoveType: int(nodes.OBJECT_SCHEMA),
+				Behavior:   int($6),
+				Missing_ok: true,
+			}
+		}
+	| DROP EXTENSION name_list opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    makeNameListAsAnyNameList($3),
+				RemoveType: int(nodes.OBJECT_EXTENSION),
+				Behavior:   int($4),
+			}
+		}
+	| DROP EXTENSION IF_P EXISTS name_list opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    makeNameListAsAnyNameList($5),
+				RemoveType: int(nodes.OBJECT_EXTENSION),
+				Behavior:   int($6),
+				Missing_ok: true,
+			}
+		}
+	/* DROP FUNCTION / PROCEDURE / ROUTINE / AGGREGATE */
+	| DROP FUNCTION any_name_list opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    $3,
+				RemoveType: int(nodes.OBJECT_FUNCTION),
+				Behavior:   int($4),
+			}
+		}
+	| DROP FUNCTION IF_P EXISTS any_name_list opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    $5,
+				RemoveType: int(nodes.OBJECT_FUNCTION),
+				Behavior:   int($6),
+				Missing_ok: true,
+			}
+		}
+	| DROP PROCEDURE any_name_list opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    $3,
+				RemoveType: int(nodes.OBJECT_PROCEDURE),
+				Behavior:   int($4),
+			}
+		}
+	| DROP PROCEDURE IF_P EXISTS any_name_list opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    $5,
+				RemoveType: int(nodes.OBJECT_PROCEDURE),
+				Behavior:   int($6),
+				Missing_ok: true,
+			}
+		}
+	| DROP ROUTINE any_name_list opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    $3,
+				RemoveType: int(nodes.OBJECT_ROUTINE),
+				Behavior:   int($4),
+			}
+		}
+	| DROP ROUTINE IF_P EXISTS any_name_list opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    $5,
+				RemoveType: int(nodes.OBJECT_ROUTINE),
+				Behavior:   int($6),
+				Missing_ok: true,
+			}
+		}
+	| DROP AGGREGATE any_name_list opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    $3,
+				RemoveType: int(nodes.OBJECT_AGGREGATE),
+				Behavior:   int($4),
+			}
+		}
+	| DROP AGGREGATE IF_P EXISTS any_name_list opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    $5,
+				RemoveType: int(nodes.OBJECT_AGGREGATE),
+				Behavior:   int($6),
+				Missing_ok: true,
+			}
+		}
+	/* DROP TRIGGER / POLICY / RULE ON relation */
+	| DROP TRIGGER name ON any_name opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    &nodes.List{Items: []nodes.Node{$5}},
+				RemoveType: int(nodes.OBJECT_TRIGGER),
+				Behavior:   int($6),
+			}
+		}
+	| DROP TRIGGER IF_P EXISTS name ON any_name opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    &nodes.List{Items: []nodes.Node{$7}},
+				RemoveType: int(nodes.OBJECT_TRIGGER),
+				Behavior:   int($8),
+				Missing_ok: true,
+			}
+		}
+	| DROP POLICY name ON any_name opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    &nodes.List{Items: []nodes.Node{$5}},
+				RemoveType: int(nodes.OBJECT_POLICY),
+				Behavior:   int($6),
+			}
+		}
+	| DROP POLICY IF_P EXISTS name ON any_name opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    &nodes.List{Items: []nodes.Node{$7}},
+				RemoveType: int(nodes.OBJECT_POLICY),
+				Behavior:   int($8),
+				Missing_ok: true,
+			}
+		}
+	| DROP RULE name ON any_name opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    &nodes.List{Items: []nodes.Node{$5}},
+				RemoveType: int(nodes.OBJECT_RULE),
+				Behavior:   int($6),
+			}
+		}
+	| DROP RULE IF_P EXISTS name ON any_name opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    &nodes.List{Items: []nodes.Node{$7}},
+				RemoveType: int(nodes.OBJECT_RULE),
+				Behavior:   int($8),
+				Missing_ok: true,
+			}
+		}
+	/* DROP EVENT TRIGGER */
+	| DROP EVENT TRIGGER name opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    makeNameListAsAnyNameList(&nodes.List{Items: []nodes.Node{&nodes.String{Str: $4}}}),
+				RemoveType: int(nodes.OBJECT_EVENT_TRIGGER),
+				Behavior:   int($5),
+			}
+		}
+	| DROP EVENT TRIGGER IF_P EXISTS name opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    makeNameListAsAnyNameList(&nodes.List{Items: []nodes.Node{&nodes.String{Str: $6}}}),
+				RemoveType: int(nodes.OBJECT_EVENT_TRIGGER),
+				Behavior:   int($7),
+				Missing_ok: true,
+			}
+		}
+	/* DROP LANGUAGE / PUBLICATION / SUBSCRIPTION */
+	| DROP LANGUAGE name opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    makeNameListAsAnyNameList(&nodes.List{Items: []nodes.Node{&nodes.String{Str: $3}}}),
+				RemoveType: int(nodes.OBJECT_LANGUAGE),
+				Behavior:   int($4),
+			}
+		}
+	| DROP LANGUAGE IF_P EXISTS name opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    makeNameListAsAnyNameList(&nodes.List{Items: []nodes.Node{&nodes.String{Str: $5}}}),
+				RemoveType: int(nodes.OBJECT_LANGUAGE),
+				Behavior:   int($6),
+				Missing_ok: true,
+			}
+		}
+	| DROP PUBLICATION name_list opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    makeNameListAsAnyNameList($3),
+				RemoveType: int(nodes.OBJECT_PUBLICATION),
+				Behavior:   int($4),
+			}
+		}
+	| DROP PUBLICATION IF_P EXISTS name_list opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    makeNameListAsAnyNameList($5),
+				RemoveType: int(nodes.OBJECT_PUBLICATION),
+				Behavior:   int($6),
+				Missing_ok: true,
+			}
+		}
+	| DROP SUBSCRIPTION name_list opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    makeNameListAsAnyNameList($3),
+				RemoveType: int(nodes.OBJECT_SUBSCRIPTION),
+				Behavior:   int($4),
+			}
+		}
+	| DROP SUBSCRIPTION IF_P EXISTS name_list opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    makeNameListAsAnyNameList($5),
+				RemoveType: int(nodes.OBJECT_SUBSCRIPTION),
+				Behavior:   int($6),
+				Missing_ok: true,
+			}
+		}
+	/* DROP INDEX CONCURRENTLY */
+	| DROP INDEX CONCURRENTLY any_name_list opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    $4,
+				RemoveType: int(nodes.OBJECT_INDEX),
+				Behavior:   int($5),
+				Concurrent: true,
+			}
+		}
+	| DROP INDEX CONCURRENTLY IF_P EXISTS any_name_list opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    $6,
+				RemoveType: int(nodes.OBJECT_INDEX),
+				Behavior:   int($7),
+				Missing_ok: true,
+				Concurrent: true,
+			}
+		}
+	/* DROP FOREIGN DATA WRAPPER / DROP SERVER */
+	| DROP FOREIGN DATA_P WRAPPER name_list opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    makeNameListAsAnyNameList($5),
+				RemoveType: int(nodes.OBJECT_FDW),
+				Behavior:   int($6),
+			}
+		}
+	| DROP FOREIGN DATA_P WRAPPER IF_P EXISTS name_list opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    makeNameListAsAnyNameList($7),
+				RemoveType: int(nodes.OBJECT_FDW),
+				Behavior:   int($8),
+				Missing_ok: true,
+			}
+		}
+	| DROP SERVER name_list opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    makeNameListAsAnyNameList($3),
+				RemoveType: int(nodes.OBJECT_FOREIGN_SERVER),
+				Behavior:   int($4),
+			}
+		}
+	| DROP SERVER IF_P EXISTS name_list opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    makeNameListAsAnyNameList($5),
+				RemoveType: int(nodes.OBJECT_FOREIGN_SERVER),
+				Behavior:   int($6),
+				Missing_ok: true,
+			}
+		}
+	/* DROP OWNED BY */
+	| DROP OWNED BY name_list opt_drop_behavior
+		{
+			$$ = &nodes.DropStmt{
+				Objects:    makeNameListAsAnyNameList($4),
+				RemoveType: int(nodes.OBJECT_ROLE),
+				Behavior:   int($5),
+			}
+		}
 	;
 
 object_type_any_name:
@@ -1648,6 +4100,14 @@ object_type_any_name:
 	| MATERIALIZED VIEW { $$ = int64(nodes.OBJECT_MATVIEW) }
 	| INDEX             { $$ = int64(nodes.OBJECT_INDEX) }
 	| FOREIGN TABLE     { $$ = int64(nodes.OBJECT_FOREIGN_TABLE) }
+	| COLLATION         { $$ = int64(nodes.OBJECT_COLLATION) }
+	| CONVERSION_P      { $$ = int64(nodes.OBJECT_CONVERSION) }
+	| STATISTICS        { $$ = int64(nodes.OBJECT_STATISTIC_EXT) }
+	| TEXT_P SEARCH PARSER { $$ = int64(nodes.OBJECT_TSPARSER) }
+	| TEXT_P SEARCH DICTIONARY { $$ = int64(nodes.OBJECT_TSDICTIONARY) }
+	| TEXT_P SEARCH TEMPLATE { $$ = int64(nodes.OBJECT_TSTEMPLATE) }
+	| TEXT_P SEARCH CONFIGURATION { $$ = int64(nodes.OBJECT_TSCONFIGURATION) }
+	| ACCESS METHOD     { $$ = int64(nodes.OBJECT_ACCESS_METHOD) }
 	;
 
 any_name_list:
@@ -1670,34 +4130,56 @@ any_name_list:
 
 IndexStmt:
 	CREATE opt_unique INDEX opt_concurrently opt_single_name
-	ON relation_expr access_method_clause '(' index_params ')' where_clause
+	ON relation_expr access_method_clause '(' index_params ')' opt_unique_null_treatment opt_include opt_reloptions OptTableSpace where_clause
 		{
 			rv := $7.(*nodes.RangeVar)
 			$$ = &nodes.IndexStmt{
-				Idxname:      $5,
-				Relation:     rv,
-				AccessMethod: $8,
-				IndexParams:  $10,
-				WhereClause:  $12,
-				Unique:       $2,
-				Concurrent:   $4,
+				Idxname:              $5,
+				Relation:             rv,
+				AccessMethod:         $8,
+				IndexParams:          $10,
+				Nulls_not_distinct:   $12,
+				IndexIncludingParams: $13,
+				Options:              $14,
+				TableSpace:           $15,
+				WhereClause:          $16,
+				Unique:               $2,
+				Concurrent:           $4,
 			}
 		}
 	| CREATE opt_unique INDEX opt_concurrently IF_P NOT EXISTS name
-	ON relation_expr access_method_clause '(' index_params ')' where_clause
+	ON relation_expr access_method_clause '(' index_params ')' opt_unique_null_treatment opt_include opt_reloptions OptTableSpace where_clause
 		{
 			rv := $10.(*nodes.RangeVar)
 			$$ = &nodes.IndexStmt{
-				Idxname:      $8,
-				Relation:     rv,
-				AccessMethod: $11,
-				IndexParams:  $13,
-				WhereClause:  $15,
-				Unique:       $2,
-				Concurrent:   $4,
-				IfNotExists:  true,
+				Idxname:              $8,
+				Relation:             rv,
+				AccessMethod:         $11,
+				IndexParams:          $13,
+				Nulls_not_distinct:   $15,
+				IndexIncludingParams: $16,
+				Options:              $17,
+				TableSpace:           $18,
+				WhereClause:          $19,
+				Unique:               $2,
+				Concurrent:           $4,
+				IfNotExists:          true,
 			}
 		}
+	;
+
+opt_include:
+	INCLUDE '(' index_including_params ')'
+		{ $$ = $3 }
+	| /* EMPTY */
+		{ $$ = nil }
+	;
+
+index_including_params:
+	index_elem
+		{ $$ = makeList($1) }
+	| index_including_params ',' index_elem
+		{ $$ = appendList($1, $3) }
 	;
 
 opt_unique:
@@ -1728,28 +4210,75 @@ index_params:
 	;
 
 index_elem:
-	ColId opt_asc_desc opt_nulls_order
+	ColId opt_collate opt_qualified_name opt_asc_desc opt_nulls_order
 		{
 			$$ = &nodes.IndexElem{
 				Name:          $1,
-				Ordering:      nodes.SortByDir($2),
-				NullsOrdering: nodes.SortByNulls($3),
+				Collation:     $2,
+				Opclass:       $3,
+				Ordering:      nodes.SortByDir($4),
+				NullsOrdering: nodes.SortByNulls($5),
 			}
 		}
-	| '(' a_expr ')' opt_asc_desc opt_nulls_order
+	| ColId opt_collate any_name reloptions opt_asc_desc opt_nulls_order
+		{
+			$$ = &nodes.IndexElem{
+				Name:          $1,
+				Collation:     $2,
+				Opclass:       $3,
+				Opclassopts:   $4,
+				Ordering:      nodes.SortByDir($5),
+				NullsOrdering: nodes.SortByNulls($6),
+			}
+		}
+	| func_expr_windowless opt_collate opt_qualified_name opt_asc_desc opt_nulls_order
+		{
+			$$ = &nodes.IndexElem{
+				Expr:          $1,
+				Collation:     $2,
+				Opclass:       $3,
+				Ordering:      nodes.SortByDir($4),
+				NullsOrdering: nodes.SortByNulls($5),
+			}
+		}
+	| func_expr_windowless opt_collate any_name reloptions opt_asc_desc opt_nulls_order
+		{
+			$$ = &nodes.IndexElem{
+				Expr:          $1,
+				Collation:     $2,
+				Opclass:       $3,
+				Opclassopts:   $4,
+				Ordering:      nodes.SortByDir($5),
+				NullsOrdering: nodes.SortByNulls($6),
+			}
+		}
+	| '(' a_expr ')' opt_collate opt_qualified_name opt_asc_desc opt_nulls_order
 		{
 			$$ = &nodes.IndexElem{
 				Expr:          $2,
-				Ordering:      nodes.SortByDir($4),
-				NullsOrdering: nodes.SortByNulls($5),
+				Collation:     $4,
+				Opclass:       $5,
+				Ordering:      nodes.SortByDir($6),
+				NullsOrdering: nodes.SortByNulls($7),
+			}
+		}
+	| '(' a_expr ')' opt_collate any_name reloptions opt_asc_desc opt_nulls_order
+		{
+			$$ = &nodes.IndexElem{
+				Expr:          $2,
+				Collation:     $4,
+				Opclass:       $5,
+				Opclassopts:   $6,
+				Ordering:      nodes.SortByDir($7),
+				NullsOrdering: nodes.SortByNulls($8),
 			}
 		}
 	;
 
 opt_nulls_order:
-	NULLS_P FIRST_P  { $$ = int64(nodes.SORTBY_NULLS_FIRST) }
-	| NULLS_P LAST_P { $$ = int64(nodes.SORTBY_NULLS_LAST) }
-	| /* EMPTY */     { $$ = int64(nodes.SORTBY_NULLS_DEFAULT) }
+	NULLS_LA FIRST_P  { $$ = int64(nodes.SORTBY_NULLS_FIRST) }
+	| NULLS_LA LAST_P { $$ = int64(nodes.SORTBY_NULLS_LAST) }
+	| /* EMPTY */      { $$ = int64(nodes.SORTBY_NULLS_DEFAULT) }
 	;
 
 /*****************************************************************************
@@ -1759,27 +4288,95 @@ opt_nulls_order:
  *****************************************************************************/
 
 ViewStmt:
-	CREATE OptTemp VIEW qualified_name opt_column_list
+	CREATE OptTemp VIEW qualified_name opt_column_list opt_reloptions
 	AS SelectStmt opt_check_option
 		{
 			rv := makeRangeVar($4).(*nodes.RangeVar)
 			$$ = &nodes.ViewStmt{
 				View:            rv,
 				Aliases:         $5,
-				Query:           $7,
-				WithCheckOption: int($8),
+				Options:         $6,
+				Query:           $8,
+				WithCheckOption: int($9),
 			}
 		}
-	| CREATE OR REPLACE OptTemp VIEW qualified_name opt_column_list
+	| CREATE OR REPLACE OptTemp VIEW qualified_name opt_column_list opt_reloptions
 	AS SelectStmt opt_check_option
 		{
 			rv := makeRangeVar($6).(*nodes.RangeVar)
 			$$ = &nodes.ViewStmt{
 				View:            rv,
 				Aliases:         $7,
-				Query:           $9,
+				Options:         $8,
+				Query:           $10,
 				Replace:         true,
-				WithCheckOption: int($10),
+				WithCheckOption: int($11),
+			}
+		}
+	| CREATE OptTemp RECURSIVE VIEW qualified_name '(' columnList ')' opt_reloptions
+	AS SelectStmt opt_check_option
+		{
+			rv := makeRangeVar($5).(*nodes.RangeVar)
+			/* Create a WITH RECURSIVE CTE wrapper */
+			cte := &nodes.CommonTableExpr{
+				Ctename:      rv.Relname,
+				Ctequery:     $11,
+				Aliascolnames:  $7,
+			}
+			wc := &nodes.WithClause{
+				Ctes:      makeList(cte),
+				Recursive: true,
+			}
+			cr := &nodes.ColumnRef{
+				Fields: &nodes.List{Items: []nodes.Node{&nodes.A_Star{}}},
+				Location: -1,
+			}
+			rt := &nodes.ResTarget{Val: cr, Location: -1}
+			fromRv := &nodes.RangeVar{Relname: rv.Relname, Inh: true, Relpersistence: 'p'}
+			sel := &nodes.SelectStmt{
+				TargetList: makeList(rt),
+				FromClause: makeList(fromRv),
+				WithClause: wc,
+			}
+			$$ = &nodes.ViewStmt{
+				View:            rv,
+				Aliases:         $7,
+				Options:         $9,
+				Query:           sel,
+				WithCheckOption: int($12),
+			}
+		}
+	| CREATE OR REPLACE OptTemp RECURSIVE VIEW qualified_name '(' columnList ')' opt_reloptions
+	AS SelectStmt opt_check_option
+		{
+			rv := makeRangeVar($7).(*nodes.RangeVar)
+			cte := &nodes.CommonTableExpr{
+				Ctename:      rv.Relname,
+				Ctequery:     $13,
+				Aliascolnames:  $9,
+			}
+			wc := &nodes.WithClause{
+				Ctes:      makeList(cte),
+				Recursive: true,
+			}
+			cr := &nodes.ColumnRef{
+				Fields: &nodes.List{Items: []nodes.Node{&nodes.A_Star{}}},
+				Location: -1,
+			}
+			rt := &nodes.ResTarget{Val: cr, Location: -1}
+			fromRv := &nodes.RangeVar{Relname: rv.Relname, Inh: true, Relpersistence: 'p'}
+			sel := &nodes.SelectStmt{
+				TargetList: makeList(rt),
+				FromClause: makeList(fromRv),
+				WithClause: wc,
+			}
+			$$ = &nodes.ViewStmt{
+				View:            rv,
+				Aliases:         $9,
+				Options:         $11,
+				Query:           sel,
+				Replace:         true,
+				WithCheckOption: int($14),
 			}
 		}
 	;
@@ -1799,34 +4396,54 @@ opt_check_option:
 
 CreateFunctionStmt:
 	CREATE opt_or_replace FUNCTION func_name func_args_with_defaults
-	RETURNS func_return createfunc_opt_list
-		{
-			$$ = &nodes.CreateFunctionStmt{
-				IsOrReplace: $2,
-				Funcname:    makeFuncName($4),
-				Parameters:  $5,
-				ReturnType:  $7,
-				Options:     $8,
-			}
-		}
-	| CREATE opt_or_replace FUNCTION func_name func_args_with_defaults
-	createfunc_opt_list
-		{
-			$$ = &nodes.CreateFunctionStmt{
-				IsOrReplace: $2,
-				Funcname:    makeFuncName($4),
-				Parameters:  $5,
-				Options:     $6,
-			}
-		}
-	| CREATE opt_or_replace PROCEDURE func_name func_args_with_defaults
-	createfunc_opt_list
+	RETURNS func_return opt_createfunc_opt_list opt_routine_body
 		{
 			n := &nodes.CreateFunctionStmt{
 				IsOrReplace: $2,
-				Funcname:    makeFuncName($4),
+				Funcname:    $4,
+				Parameters:  $5,
+				ReturnType:  $7,
+				Options:     $8,
+				SqlBody:     $9,
+			}
+			$$ = n
+		}
+	| CREATE opt_or_replace FUNCTION func_name func_args_with_defaults
+	RETURNS TABLE '(' table_func_column_list ')' opt_createfunc_opt_list opt_routine_body
+		{
+			/* RETURNS TABLE(...) adds table columns to parameter list */
+			params := concatLists($5, $9)
+			n := &nodes.CreateFunctionStmt{
+				IsOrReplace: $2,
+				Funcname:    $4,
+				Parameters:  params,
+				ReturnType:  &nodes.TypeName{Names: makeFuncName("pg_catalog", "record"), Location: -1},
+				Options:     $11,
+				SqlBody:     $12,
+			}
+			$$ = n
+		}
+	| CREATE opt_or_replace FUNCTION func_name func_args_with_defaults
+	opt_createfunc_opt_list opt_routine_body
+		{
+			n := &nodes.CreateFunctionStmt{
+				IsOrReplace: $2,
+				Funcname:    $4,
 				Parameters:  $5,
 				Options:     $6,
+				SqlBody:     $7,
+			}
+			$$ = n
+		}
+	| CREATE opt_or_replace PROCEDURE func_name func_args_with_defaults
+	opt_createfunc_opt_list opt_routine_body
+		{
+			n := &nodes.CreateFunctionStmt{
+				IsOrReplace: $2,
+				Funcname:    $4,
+				Parameters:  $5,
+				Options:     $6,
+				SqlBody:     $7,
 			}
 			n.Options = appendList(n.Options, &nodes.DefElem{Defname: "isProcedure", Arg: &nodes.Integer{Ival: 1}})
 			$$ = n
@@ -1924,8 +4541,31 @@ func_return:
 	func_type { $$ = $1 }
 	;
 
+table_func_column_list:
+	table_func_column
+		{ $$ = makeList($1) }
+	| table_func_column_list ',' table_func_column
+		{ $$ = appendList($1, $3) }
+	;
+
+table_func_column:
+	param_name func_type
+		{
+			$$ = &nodes.FunctionParameter{
+				Name:    $1,
+				ArgType: $2,
+				Mode:    nodes.FUNC_PARAM_TABLE,
+			}
+		}
+	;
+
 func_type:
 	Typename { $$ = $1 }
+	;
+
+opt_createfunc_opt_list:
+	createfunc_opt_list { $$ = $1 }
+	| /* EMPTY */ { $$ = nil }
 	;
 
 createfunc_opt_list:
@@ -1935,12 +4575,70 @@ createfunc_opt_list:
 		{ $$ = appendList($1, $2) }
 	;
 
+opt_routine_body:
+	ReturnStmt
+		{
+			$$ = $1
+		}
+	| BEGIN_P ATOMIC routine_body_stmt_list END_P
+		{
+			/* A compound statement stored as a single-item list containing the stmt list */
+			$$ = makeList($3)
+		}
+	| /* EMPTY */
+		{
+			$$ = nil
+		}
+	;
+
+routine_body_stmt_list:
+	routine_body_stmt_list routine_body_stmt ';'
+		{
+			if $2 != nil {
+				$$ = appendList($1, $2)
+			} else {
+				$$ = $1
+			}
+		}
+	| /* EMPTY */
+		{
+			$$ = nil
+		}
+	;
+
+routine_body_stmt:
+	stmt
+		{
+			$$ = $1
+		}
+	| ReturnStmt
+		{
+			$$ = $1
+		}
+	;
+
+ReturnStmt:
+	RETURN a_expr
+		{
+			$$ = &nodes.ReturnStmt{
+				Returnval: $2,
+			}
+		}
+	;
+
 createfunc_opt_item:
-	LANGUAGE name
+	LANGUAGE NonReservedWord_or_Sconst
 		{
 			$$ = &nodes.DefElem{
 				Defname: "language",
 				Arg:     &nodes.String{Str: $2},
+			}
+		}
+	| WINDOW
+		{
+			$$ = &nodes.DefElem{
+				Defname: "window",
+				Arg:     &nodes.Integer{Ival: 1},
 			}
 		}
 	| common_func_opt_item { $$ = $1 }
@@ -2052,6 +4750,27 @@ common_func_opt_item:
 				Arg:     &nodes.String{Str: $2},
 			}
 		}
+	| SET set_rest_more
+		{
+			$$ = &nodes.DefElem{
+				Defname: "set",
+				Arg:     $2,
+			}
+		}
+	| VariableResetStmt
+		{
+			$$ = &nodes.DefElem{
+				Defname: "set",
+				Arg:     $1,
+			}
+		}
+	| SUPPORT any_name
+		{
+			$$ = &nodes.DefElem{
+				Defname: "support",
+				Arg:     $2,
+			}
+		}
 	;
 
 /*****************************************************************************
@@ -2068,16 +4787,39 @@ TransactionStmt:
 				Chain: $3,
 			}
 		}
-	| BEGIN_P opt_transaction
+	| BEGIN_P opt_transaction transaction_mode_list_or_empty
 		{
 			$$ = &nodes.TransactionStmt{
-				Kind: nodes.TRANS_STMT_BEGIN,
+				Kind:    nodes.TRANS_STMT_BEGIN,
+				Options: $3,
 			}
 		}
-	| START TRANSACTION
+	| START TRANSACTION transaction_mode_list_or_empty
 		{
 			$$ = &nodes.TransactionStmt{
-				Kind: nodes.TRANS_STMT_START,
+				Kind:    nodes.TRANS_STMT_START,
+				Options: $3,
+			}
+		}
+	| PREPARE TRANSACTION Sconst
+		{
+			$$ = &nodes.TransactionStmt{
+				Kind: nodes.TRANS_STMT_PREPARE,
+				Gid:  $3,
+			}
+		}
+	| COMMIT PREPARED Sconst
+		{
+			$$ = &nodes.TransactionStmt{
+				Kind: nodes.TRANS_STMT_COMMIT_PREPARED,
+				Gid:  $3,
+			}
+		}
+	| ROLLBACK PREPARED Sconst
+		{
+			$$ = &nodes.TransactionStmt{
+				Kind: nodes.TRANS_STMT_ROLLBACK_PREPARED,
+				Gid:  $3,
 			}
 		}
 	| COMMIT opt_transaction opt_transaction_chain
@@ -2197,11 +4939,17 @@ ExplainStmt:
 	;
 
 ExplainableStmt:
-	SelectStmt      { $$ = $1 }
-	| InsertStmt    { $$ = $1 }
-	| UpdateStmt    { $$ = $1 }
-	| DeleteStmt    { $$ = $1 }
-	| CreateStmt    { $$ = $1 }
+	SelectStmt          { $$ = $1 }
+	| InsertStmt        { $$ = $1 }
+	| UpdateStmt        { $$ = $1 }
+	| DeleteStmt        { $$ = $1 }
+	| MergeStmt         { $$ = $1 }
+	| DeclareCursorStmt { $$ = $1 }
+	| CreateAsStmt      { $$ = $1 }
+	| CreateMatViewStmt { $$ = $1 }
+	| RefreshMatViewStmt { $$ = $1 }
+	| ExecuteStmt       { $$ = $1 }
+	| CreateStmt        { $$ = $1 }
 	;
 
 /*****************************************************************************
@@ -2223,7 +4971,7 @@ CopyStmt:
 				WhereClause: $10,
 			}
 		}
-	| COPY relation_expr opt_column_list copy_from copy_file_name where_clause
+	| COPY relation_expr opt_column_list copy_from copy_file_name copy_opt_list where_clause
 		{
 			rv := $2.(*nodes.RangeVar)
 			$$ = &nodes.CopyStmt{
@@ -2231,10 +4979,57 @@ CopyStmt:
 				Attlist:     $3,
 				IsFrom:      $4,
 				Filename:    $5,
-				WhereClause: $6,
+				Options:     $6,
+				WhereClause: $7,
 			}
 		}
-	| COPY '(' SelectStmt ')' TO copy_file_name copy_opt_with '(' utility_option_list ')'
+	| COPY relation_expr opt_column_list copy_from PROGRAM Sconst copy_opt_with '(' utility_option_list ')' where_clause
+		{
+			rv := $2.(*nodes.RangeVar)
+			$$ = &nodes.CopyStmt{
+				Relation:    rv,
+				Attlist:     $3,
+				IsFrom:      $4,
+				IsProgram:   true,
+				Filename:    $6,
+				Options:     $9,
+				WhereClause: $11,
+			}
+		}
+	| COPY relation_expr opt_column_list copy_from PROGRAM Sconst copy_opt_list where_clause
+		{
+			rv := $2.(*nodes.RangeVar)
+			$$ = &nodes.CopyStmt{
+				Relation:    rv,
+				Attlist:     $3,
+				IsFrom:      $4,
+				IsProgram:   true,
+				Filename:    $6,
+				Options:     $7,
+				WhereClause: $8,
+			}
+		}
+	| COPY '(' PreparableStmt ')' TO PROGRAM Sconst copy_opt_with '(' utility_option_list ')'
+		{
+			$$ = &nodes.CopyStmt{
+				Query:     $3,
+				IsFrom:    false,
+				IsProgram: true,
+				Filename:  $7,
+				Options:   $10,
+			}
+		}
+	| COPY '(' PreparableStmt ')' TO PROGRAM Sconst copy_opt_list
+		{
+			$$ = &nodes.CopyStmt{
+				Query:     $3,
+				IsFrom:    false,
+				IsProgram: true,
+				Filename:  $7,
+				Options:   $8,
+			}
+		}
+	| COPY '(' PreparableStmt ')' TO copy_file_name copy_opt_with '(' utility_option_list ')'
 		{
 			$$ = &nodes.CopyStmt{
 				Query:    $3,
@@ -2243,12 +5038,13 @@ CopyStmt:
 				Options:  $9,
 			}
 		}
-	| COPY '(' SelectStmt ')' TO copy_file_name
+	| COPY '(' PreparableStmt ')' TO copy_file_name copy_opt_list
 		{
 			$$ = &nodes.CopyStmt{
 				Query:    $3,
 				IsFrom:   false,
 				Filename: $6,
+				Options:  $7,
 			}
 		}
 	;
@@ -2267,6 +5063,82 @@ copy_file_name:
 copy_opt_with:
 	WITH {}
 	| /* EMPTY */ {}
+	;
+
+/* old-style COPY option syntax */
+copy_opt_list:
+	copy_opt_list copy_opt_item
+		{
+			if $2 != nil {
+				$$ = appendList($1, $2)
+			} else {
+				$$ = $1
+			}
+		}
+	| WITH copy_opt_item
+		{
+			if $2 != nil {
+				$$ = makeList($2)
+			} else {
+				$$ = nil
+			}
+		}
+	| /* EMPTY */ { $$ = nil }
+	;
+
+copy_opt_item:
+	BINARY
+		{
+			$$ = &nodes.DefElem{Defname: "format", Arg: &nodes.String{Str: "binary"}}
+		}
+	| FREEZE
+		{
+			$$ = &nodes.DefElem{Defname: "freeze", Arg: &nodes.Boolean{Boolval: true}}
+		}
+	| DELIMITER opt_as Sconst
+		{
+			$$ = &nodes.DefElem{Defname: "delimiter", Arg: &nodes.String{Str: $3}}
+		}
+	| NULL_P opt_as Sconst
+		{
+			$$ = &nodes.DefElem{Defname: "null", Arg: &nodes.String{Str: $3}}
+		}
+	| CSV
+		{
+			$$ = &nodes.DefElem{Defname: "format", Arg: &nodes.String{Str: "csv"}}
+		}
+	| HEADER_P
+		{
+			$$ = &nodes.DefElem{Defname: "header", Arg: &nodes.Boolean{Boolval: true}}
+		}
+	| QUOTE opt_as Sconst
+		{
+			$$ = &nodes.DefElem{Defname: "quote", Arg: &nodes.String{Str: $3}}
+		}
+	| ESCAPE opt_as Sconst
+		{
+			$$ = &nodes.DefElem{Defname: "escape", Arg: &nodes.String{Str: $3}}
+		}
+	| FORCE QUOTE columnList
+		{
+			$$ = &nodes.DefElem{Defname: "force_quote", Arg: $3}
+		}
+	| FORCE QUOTE '*'
+		{
+			$$ = &nodes.DefElem{Defname: "force_quote", Arg: &nodes.A_Star{}}
+		}
+	| FORCE NOT NULL_P columnList
+		{
+			$$ = &nodes.DefElem{Defname: "force_not_null", Arg: $4}
+		}
+	| FORCE NULL_P columnList
+		{
+			$$ = &nodes.DefElem{Defname: "force_null", Arg: $3}
+		}
+	| ENCODING Sconst
+		{
+			$$ = &nodes.DefElem{Defname: "encoding", Arg: &nodes.String{Str: $2}}
+		}
 	;
 
 utility_option_list:
@@ -2291,15 +5163,32 @@ utility_option_elem:
 	;
 
 utility_option_name:
-	ColId       { $$ = $1 }
-	| ANALYZE   { $$ = "analyze" }
-	| VERBOSE   { $$ = "verbose" }
+	ColId            { $$ = $1 }
+	| ANALYZE        { $$ = "analyze" }
+	| VERBOSE        { $$ = "verbose" }
+	| FULL           { $$ = "full" }
+	| FREEZE         { $$ = "freeze" }
+	| FORMAT         { $$ = "format" }
+	| NULL_P         { $$ = "null" }
+	| DEFAULT        { $$ = "default" }
+	| FORCE          { $$ = "force" }
+	| CONCURRENTLY   { $$ = "concurrently" }
 	;
 
 utility_option_arg:
 	opt_boolean_or_string   { $$ = &nodes.String{Str: $1} }
 	| NumericOnly           { $$ = $1 }
+	| '*'                   { $$ = &nodes.A_Star{} }
+	| DEFAULT               { $$ = &nodes.String{Str: "default"} }
+	| '(' utility_option_arg_list ')' { $$ = $2 }
 	| /* EMPTY */           { $$ = nil }
+	;
+
+utility_option_arg_list:
+	opt_boolean_or_string
+		{ $$ = makeList(&nodes.String{Str: $1}) }
+	| utility_option_arg_list ',' opt_boolean_or_string
+		{ $$ = appendList($1, &nodes.String{Str: $3}) }
 	;
 
 opt_boolean_or_string:
@@ -2379,16 +5268,232 @@ GrantStmt:
 				GrantOption: $7,
 			}
 		}
+	| GRANT privileges ON SEQUENCE any_name_list TO grantee_list opt_grant_grant_option
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     true,
+				Targtype:    nodes.ACL_TARGET_OBJECT,
+				Objtype:     nodes.OBJECT_SEQUENCE,
+				Objects:     makeRangeVarList($5),
+				Privileges:  $2,
+				Grantees:    $7,
+				GrantOption: $8,
+			}
+		}
+	| GRANT privileges ON FUNCTION function_with_argtypes_list TO grantee_list opt_grant_grant_option
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     true,
+				Targtype:    nodes.ACL_TARGET_OBJECT,
+				Objtype:     nodes.OBJECT_FUNCTION,
+				Objects:     $5,
+				Privileges:  $2,
+				Grantees:    $7,
+				GrantOption: $8,
+			}
+		}
+	| GRANT privileges ON PROCEDURE function_with_argtypes_list TO grantee_list opt_grant_grant_option
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     true,
+				Targtype:    nodes.ACL_TARGET_OBJECT,
+				Objtype:     nodes.OBJECT_PROCEDURE,
+				Objects:     $5,
+				Privileges:  $2,
+				Grantees:    $7,
+				GrantOption: $8,
+			}
+		}
+	| GRANT privileges ON ROUTINE function_with_argtypes_list TO grantee_list opt_grant_grant_option
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     true,
+				Targtype:    nodes.ACL_TARGET_OBJECT,
+				Objtype:     nodes.OBJECT_ROUTINE,
+				Objects:     $5,
+				Privileges:  $2,
+				Grantees:    $7,
+				GrantOption: $8,
+			}
+		}
+	| GRANT privileges ON DATABASE name_list TO grantee_list opt_grant_grant_option
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     true,
+				Targtype:    nodes.ACL_TARGET_OBJECT,
+				Objtype:     nodes.OBJECT_DATABASE,
+				Objects:     makeNameListAsAnyNameList($5),
+				Privileges:  $2,
+				Grantees:    $7,
+				GrantOption: $8,
+			}
+		}
+	| GRANT privileges ON DOMAIN_P any_name_list TO grantee_list opt_grant_grant_option
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     true,
+				Targtype:    nodes.ACL_TARGET_OBJECT,
+				Objtype:     nodes.OBJECT_DOMAIN,
+				Objects:     $5,
+				Privileges:  $2,
+				Grantees:    $7,
+				GrantOption: $8,
+			}
+		}
+	| GRANT privileges ON LANGUAGE name_list TO grantee_list opt_grant_grant_option
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     true,
+				Targtype:    nodes.ACL_TARGET_OBJECT,
+				Objtype:     nodes.OBJECT_LANGUAGE,
+				Objects:     makeNameListAsAnyNameList($5),
+				Privileges:  $2,
+				Grantees:    $7,
+				GrantOption: $8,
+			}
+		}
+	| GRANT privileges ON SCHEMA name_list TO grantee_list opt_grant_grant_option
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     true,
+				Targtype:    nodes.ACL_TARGET_OBJECT,
+				Objtype:     nodes.OBJECT_SCHEMA,
+				Objects:     makeNameListAsAnyNameList($5),
+				Privileges:  $2,
+				Grantees:    $7,
+				GrantOption: $8,
+			}
+		}
+	| GRANT privileges ON TABLESPACE name_list TO grantee_list opt_grant_grant_option
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     true,
+				Targtype:    nodes.ACL_TARGET_OBJECT,
+				Objtype:     nodes.OBJECT_TABLESPACE,
+				Objects:     makeNameListAsAnyNameList($5),
+				Privileges:  $2,
+				Grantees:    $7,
+				GrantOption: $8,
+			}
+		}
+	| GRANT privileges ON TYPE_P any_name_list TO grantee_list opt_grant_grant_option
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     true,
+				Targtype:    nodes.ACL_TARGET_OBJECT,
+				Objtype:     nodes.OBJECT_TYPE,
+				Objects:     $5,
+				Privileges:  $2,
+				Grantees:    $7,
+				GrantOption: $8,
+			}
+		}
+	| GRANT privileges ON FOREIGN DATA_P WRAPPER name_list TO grantee_list opt_grant_grant_option
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     true,
+				Targtype:    nodes.ACL_TARGET_OBJECT,
+				Objtype:     nodes.OBJECT_FDW,
+				Objects:     makeNameListAsAnyNameList($7),
+				Privileges:  $2,
+				Grantees:    $9,
+				GrantOption: $10,
+			}
+		}
+	| GRANT privileges ON FOREIGN SERVER name_list TO grantee_list opt_grant_grant_option
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     true,
+				Targtype:    nodes.ACL_TARGET_OBJECT,
+				Objtype:     nodes.OBJECT_FOREIGN_SERVER,
+				Objects:     makeNameListAsAnyNameList($6),
+				Privileges:  $2,
+				Grantees:    $8,
+				GrantOption: $9,
+			}
+		}
+	| GRANT privileges ON ALL TABLES IN_P SCHEMA name_list TO grantee_list opt_grant_grant_option
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     true,
+				Targtype:    nodes.ACL_TARGET_ALL_IN_SCHEMA,
+				Objtype:     nodes.OBJECT_TABLE,
+				Objects:     makeNameListAsAnyNameList($8),
+				Privileges:  $2,
+				Grantees:    $10,
+				GrantOption: $11,
+			}
+		}
+	| GRANT privileges ON ALL SEQUENCES IN_P SCHEMA name_list TO grantee_list opt_grant_grant_option
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     true,
+				Targtype:    nodes.ACL_TARGET_ALL_IN_SCHEMA,
+				Objtype:     nodes.OBJECT_SEQUENCE,
+				Objects:     makeNameListAsAnyNameList($8),
+				Privileges:  $2,
+				Grantees:    $10,
+				GrantOption: $11,
+			}
+		}
+	| GRANT privileges ON ALL FUNCTIONS IN_P SCHEMA name_list TO grantee_list opt_grant_grant_option
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     true,
+				Targtype:    nodes.ACL_TARGET_ALL_IN_SCHEMA,
+				Objtype:     nodes.OBJECT_FUNCTION,
+				Objects:     makeNameListAsAnyNameList($8),
+				Privileges:  $2,
+				Grantees:    $10,
+				GrantOption: $11,
+			}
+		}
+	| GRANT privileges ON ALL ROUTINES IN_P SCHEMA name_list TO grantee_list opt_grant_grant_option
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     true,
+				Targtype:    nodes.ACL_TARGET_ALL_IN_SCHEMA,
+				Objtype:     nodes.OBJECT_ROUTINE,
+				Objects:     makeNameListAsAnyNameList($8),
+				Privileges:  $2,
+				Grantees:    $10,
+				GrantOption: $11,
+			}
+		}
+	| GRANT privileges ON ALL PROCEDURES IN_P SCHEMA name_list TO grantee_list opt_grant_grant_option
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     true,
+				Targtype:    nodes.ACL_TARGET_ALL_IN_SCHEMA,
+				Objtype:     nodes.OBJECT_PROCEDURE,
+				Objects:     makeNameListAsAnyNameList($8),
+				Privileges:  $2,
+				Grantees:    $10,
+				GrantOption: $11,
+			}
+		}
+	| GRANT privileges ON LARGE_P OBJECT_P NumericOnly TO grantee_list opt_grant_grant_option
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     true,
+				Targtype:    nodes.ACL_TARGET_OBJECT,
+				Objtype:     nodes.OBJECT_LARGEOBJECT,
+				Objects:     makeList($6),
+				Privileges:  $2,
+				Grantees:    $8,
+				GrantOption: $9,
+			}
+		}
 	;
 
 RevokeStmt:
 	REVOKE privileges ON TABLE any_name_list FROM grantee_list opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
-				IsGrant:  false,
-				Targtype: nodes.ACL_TARGET_OBJECT,
-				Objtype:  nodes.OBJECT_TABLE,
-				Objects:  makeRangeVarList($5),
+				IsGrant:    false,
+				Targtype:   nodes.ACL_TARGET_OBJECT,
+				Objtype:    nodes.OBJECT_TABLE,
+				Objects:    makeRangeVarList($5),
 				Privileges: $2,
 				Grantees:   $7,
 				Behavior:   nodes.DropBehavior($8),
@@ -2397,13 +5502,229 @@ RevokeStmt:
 	| REVOKE privileges ON any_name_list FROM grantee_list opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
-				IsGrant:  false,
-				Targtype: nodes.ACL_TARGET_OBJECT,
-				Objtype:  nodes.OBJECT_TABLE,
-				Objects:  makeRangeVarList($4),
+				IsGrant:    false,
+				Targtype:   nodes.ACL_TARGET_OBJECT,
+				Objtype:    nodes.OBJECT_TABLE,
+				Objects:    makeRangeVarList($4),
 				Privileges: $2,
 				Grantees:   $6,
 				Behavior:   nodes.DropBehavior($7),
+			}
+		}
+	| REVOKE privileges ON SEQUENCE any_name_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:    false,
+				Targtype:   nodes.ACL_TARGET_OBJECT,
+				Objtype:    nodes.OBJECT_SEQUENCE,
+				Objects:    makeRangeVarList($5),
+				Privileges: $2,
+				Grantees:   $7,
+				Behavior:   nodes.DropBehavior($8),
+			}
+		}
+	| REVOKE privileges ON FUNCTION function_with_argtypes_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:    false,
+				Targtype:   nodes.ACL_TARGET_OBJECT,
+				Objtype:    nodes.OBJECT_FUNCTION,
+				Objects:    $5,
+				Privileges: $2,
+				Grantees:   $7,
+				Behavior:   nodes.DropBehavior($8),
+			}
+		}
+	| REVOKE privileges ON PROCEDURE function_with_argtypes_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:    false,
+				Targtype:   nodes.ACL_TARGET_OBJECT,
+				Objtype:    nodes.OBJECT_PROCEDURE,
+				Objects:    $5,
+				Privileges: $2,
+				Grantees:   $7,
+				Behavior:   nodes.DropBehavior($8),
+			}
+		}
+	| REVOKE privileges ON ROUTINE function_with_argtypes_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:    false,
+				Targtype:   nodes.ACL_TARGET_OBJECT,
+				Objtype:    nodes.OBJECT_ROUTINE,
+				Objects:    $5,
+				Privileges: $2,
+				Grantees:   $7,
+				Behavior:   nodes.DropBehavior($8),
+			}
+		}
+	| REVOKE privileges ON DATABASE name_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:    false,
+				Targtype:   nodes.ACL_TARGET_OBJECT,
+				Objtype:    nodes.OBJECT_DATABASE,
+				Objects:    makeNameListAsAnyNameList($5),
+				Privileges: $2,
+				Grantees:   $7,
+				Behavior:   nodes.DropBehavior($8),
+			}
+		}
+	| REVOKE privileges ON DOMAIN_P any_name_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:    false,
+				Targtype:   nodes.ACL_TARGET_OBJECT,
+				Objtype:    nodes.OBJECT_DOMAIN,
+				Objects:    $5,
+				Privileges: $2,
+				Grantees:   $7,
+				Behavior:   nodes.DropBehavior($8),
+			}
+		}
+	| REVOKE privileges ON LANGUAGE name_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:    false,
+				Targtype:   nodes.ACL_TARGET_OBJECT,
+				Objtype:    nodes.OBJECT_LANGUAGE,
+				Objects:    makeNameListAsAnyNameList($5),
+				Privileges: $2,
+				Grantees:   $7,
+				Behavior:   nodes.DropBehavior($8),
+			}
+		}
+	| REVOKE privileges ON SCHEMA name_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:    false,
+				Targtype:   nodes.ACL_TARGET_OBJECT,
+				Objtype:    nodes.OBJECT_SCHEMA,
+				Objects:    makeNameListAsAnyNameList($5),
+				Privileges: $2,
+				Grantees:   $7,
+				Behavior:   nodes.DropBehavior($8),
+			}
+		}
+	| REVOKE privileges ON TABLESPACE name_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:    false,
+				Targtype:   nodes.ACL_TARGET_OBJECT,
+				Objtype:    nodes.OBJECT_TABLESPACE,
+				Objects:    makeNameListAsAnyNameList($5),
+				Privileges: $2,
+				Grantees:   $7,
+				Behavior:   nodes.DropBehavior($8),
+			}
+		}
+	| REVOKE privileges ON TYPE_P any_name_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:    false,
+				Targtype:   nodes.ACL_TARGET_OBJECT,
+				Objtype:    nodes.OBJECT_TYPE,
+				Objects:    $5,
+				Privileges: $2,
+				Grantees:   $7,
+				Behavior:   nodes.DropBehavior($8),
+			}
+		}
+	| REVOKE privileges ON FOREIGN DATA_P WRAPPER name_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:    false,
+				Targtype:   nodes.ACL_TARGET_OBJECT,
+				Objtype:    nodes.OBJECT_FDW,
+				Objects:    makeNameListAsAnyNameList($7),
+				Privileges: $2,
+				Grantees:   $9,
+				Behavior:   nodes.DropBehavior($10),
+			}
+		}
+	| REVOKE privileges ON FOREIGN SERVER name_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:    false,
+				Targtype:   nodes.ACL_TARGET_OBJECT,
+				Objtype:    nodes.OBJECT_FOREIGN_SERVER,
+				Objects:    makeNameListAsAnyNameList($6),
+				Privileges: $2,
+				Grantees:   $8,
+				Behavior:   nodes.DropBehavior($9),
+			}
+		}
+	| REVOKE privileges ON ALL TABLES IN_P SCHEMA name_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:    false,
+				Targtype:   nodes.ACL_TARGET_ALL_IN_SCHEMA,
+				Objtype:    nodes.OBJECT_TABLE,
+				Objects:    makeNameListAsAnyNameList($8),
+				Privileges: $2,
+				Grantees:   $10,
+				Behavior:   nodes.DropBehavior($11),
+			}
+		}
+	| REVOKE privileges ON ALL SEQUENCES IN_P SCHEMA name_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:    false,
+				Targtype:   nodes.ACL_TARGET_ALL_IN_SCHEMA,
+				Objtype:    nodes.OBJECT_SEQUENCE,
+				Objects:    makeNameListAsAnyNameList($8),
+				Privileges: $2,
+				Grantees:   $10,
+				Behavior:   nodes.DropBehavior($11),
+			}
+		}
+	| REVOKE privileges ON ALL FUNCTIONS IN_P SCHEMA name_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:    false,
+				Targtype:   nodes.ACL_TARGET_ALL_IN_SCHEMA,
+				Objtype:    nodes.OBJECT_FUNCTION,
+				Objects:    makeNameListAsAnyNameList($8),
+				Privileges: $2,
+				Grantees:   $10,
+				Behavior:   nodes.DropBehavior($11),
+			}
+		}
+	| REVOKE privileges ON ALL ROUTINES IN_P SCHEMA name_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:    false,
+				Targtype:   nodes.ACL_TARGET_ALL_IN_SCHEMA,
+				Objtype:    nodes.OBJECT_ROUTINE,
+				Objects:    makeNameListAsAnyNameList($8),
+				Privileges: $2,
+				Grantees:   $10,
+				Behavior:   nodes.DropBehavior($11),
+			}
+		}
+	| REVOKE privileges ON ALL PROCEDURES IN_P SCHEMA name_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:    false,
+				Targtype:   nodes.ACL_TARGET_ALL_IN_SCHEMA,
+				Objtype:    nodes.OBJECT_PROCEDURE,
+				Objects:    makeNameListAsAnyNameList($8),
+				Privileges: $2,
+				Grantees:   $10,
+				Behavior:   nodes.DropBehavior($11),
+			}
+		}
+	| REVOKE privileges ON LARGE_P OBJECT_P NumericOnly FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:    false,
+				Targtype:   nodes.ACL_TARGET_OBJECT,
+				Objtype:    nodes.OBJECT_LARGEOBJECT,
+				Objects:    makeList($6),
+				Privileges: $2,
+				Grantees:   $8,
+				Behavior:   nodes.DropBehavior($9),
 			}
 		}
 	| REVOKE GRANT OPTION FOR privileges ON TABLE any_name_list FROM grantee_list opt_drop_behavior
@@ -2419,10 +5740,189 @@ RevokeStmt:
 				Behavior:    nodes.DropBehavior($11),
 			}
 		}
+	| REVOKE GRANT OPTION FOR privileges ON any_name_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     false,
+				Targtype:    nodes.ACL_TARGET_OBJECT,
+				Objtype:     nodes.OBJECT_TABLE,
+				Objects:     makeRangeVarList($7),
+				Privileges:  $5,
+				Grantees:    $9,
+				GrantOption: true,
+				Behavior:    nodes.DropBehavior($10),
+			}
+		}
+	| REVOKE GRANT OPTION FOR privileges ON SEQUENCE any_name_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     false,
+				Targtype:    nodes.ACL_TARGET_OBJECT,
+				Objtype:     nodes.OBJECT_SEQUENCE,
+				Objects:     makeRangeVarList($8),
+				Privileges:  $5,
+				Grantees:    $10,
+				GrantOption: true,
+				Behavior:    nodes.DropBehavior($11),
+			}
+		}
+	| REVOKE GRANT OPTION FOR privileges ON FUNCTION function_with_argtypes_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     false,
+				Targtype:    nodes.ACL_TARGET_OBJECT,
+				Objtype:     nodes.OBJECT_FUNCTION,
+				Objects:     $8,
+				Privileges:  $5,
+				Grantees:    $10,
+				GrantOption: true,
+				Behavior:    nodes.DropBehavior($11),
+			}
+		}
+	| REVOKE GRANT OPTION FOR privileges ON PROCEDURE function_with_argtypes_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     false,
+				Targtype:    nodes.ACL_TARGET_OBJECT,
+				Objtype:     nodes.OBJECT_PROCEDURE,
+				Objects:     $8,
+				Privileges:  $5,
+				Grantees:    $10,
+				GrantOption: true,
+				Behavior:    nodes.DropBehavior($11),
+			}
+		}
+	| REVOKE GRANT OPTION FOR privileges ON ROUTINE function_with_argtypes_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     false,
+				Targtype:    nodes.ACL_TARGET_OBJECT,
+				Objtype:     nodes.OBJECT_ROUTINE,
+				Objects:     $8,
+				Privileges:  $5,
+				Grantees:    $10,
+				GrantOption: true,
+				Behavior:    nodes.DropBehavior($11),
+			}
+		}
+	| REVOKE GRANT OPTION FOR privileges ON DATABASE name_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     false,
+				Targtype:    nodes.ACL_TARGET_OBJECT,
+				Objtype:     nodes.OBJECT_DATABASE,
+				Objects:     makeNameListAsAnyNameList($8),
+				Privileges:  $5,
+				Grantees:    $10,
+				GrantOption: true,
+				Behavior:    nodes.DropBehavior($11),
+			}
+		}
+	| REVOKE GRANT OPTION FOR privileges ON DOMAIN_P any_name_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     false,
+				Targtype:    nodes.ACL_TARGET_OBJECT,
+				Objtype:     nodes.OBJECT_DOMAIN,
+				Objects:     $8,
+				Privileges:  $5,
+				Grantees:    $10,
+				GrantOption: true,
+				Behavior:    nodes.DropBehavior($11),
+			}
+		}
+	| REVOKE GRANT OPTION FOR privileges ON LANGUAGE name_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     false,
+				Targtype:    nodes.ACL_TARGET_OBJECT,
+				Objtype:     nodes.OBJECT_LANGUAGE,
+				Objects:     makeNameListAsAnyNameList($8),
+				Privileges:  $5,
+				Grantees:    $10,
+				GrantOption: true,
+				Behavior:    nodes.DropBehavior($11),
+			}
+		}
+	| REVOKE GRANT OPTION FOR privileges ON SCHEMA name_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     false,
+				Targtype:    nodes.ACL_TARGET_OBJECT,
+				Objtype:     nodes.OBJECT_SCHEMA,
+				Objects:     makeNameListAsAnyNameList($8),
+				Privileges:  $5,
+				Grantees:    $10,
+				GrantOption: true,
+				Behavior:    nodes.DropBehavior($11),
+			}
+		}
+	| REVOKE GRANT OPTION FOR privileges ON TABLESPACE name_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     false,
+				Targtype:    nodes.ACL_TARGET_OBJECT,
+				Objtype:     nodes.OBJECT_TABLESPACE,
+				Objects:     makeNameListAsAnyNameList($8),
+				Privileges:  $5,
+				Grantees:    $10,
+				GrantOption: true,
+				Behavior:    nodes.DropBehavior($11),
+			}
+		}
+	| REVOKE GRANT OPTION FOR privileges ON TYPE_P any_name_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     false,
+				Targtype:    nodes.ACL_TARGET_OBJECT,
+				Objtype:     nodes.OBJECT_TYPE,
+				Objects:     $8,
+				Privileges:  $5,
+				Grantees:    $10,
+				GrantOption: true,
+				Behavior:    nodes.DropBehavior($11),
+			}
+		}
+	| REVOKE GRANT OPTION FOR privileges ON FOREIGN DATA_P WRAPPER name_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     false,
+				Targtype:    nodes.ACL_TARGET_OBJECT,
+				Objtype:     nodes.OBJECT_FDW,
+				Objects:     makeNameListAsAnyNameList($10),
+				Privileges:  $5,
+				Grantees:    $12,
+				GrantOption: true,
+				Behavior:    nodes.DropBehavior($13),
+			}
+		}
+	| REVOKE GRANT OPTION FOR privileges ON FOREIGN SERVER name_list FROM grantee_list opt_drop_behavior
+		{
+			$$ = &nodes.GrantStmt{
+				IsGrant:     false,
+				Targtype:    nodes.ACL_TARGET_OBJECT,
+				Objtype:     nodes.OBJECT_FOREIGN_SERVER,
+				Objects:     makeNameListAsAnyNameList($9),
+				Privileges:  $5,
+				Grantees:    $11,
+				GrantOption: true,
+				Behavior:    nodes.DropBehavior($12),
+			}
+		}
 	;
 
 privileges:
-	ALL PRIVILEGES  { $$ = nil }
+	ALL PRIVILEGES '(' columnList ')'
+		{
+			ap := &nodes.AccessPriv{Cols: $4}
+			$$ = makeList(ap)
+		}
+	| ALL '(' columnList ')'
+		{
+			ap := &nodes.AccessPriv{Cols: $3}
+			$$ = makeList(ap)
+		}
+	| ALL PRIVILEGES  { $$ = nil }
 	| ALL           { $$ = nil }
 	| privilege_list { $$ = $1 }
 	;
@@ -2435,16 +5935,26 @@ privilege_list:
 	;
 
 privilege:
-	SELECT      { $$ = &nodes.AccessPriv{PrivName: "select"} }
-	| REFERENCES { $$ = &nodes.AccessPriv{PrivName: "references"} }
-	| CREATE    { $$ = &nodes.AccessPriv{PrivName: "create"} }
-	| INSERT    { $$ = &nodes.AccessPriv{PrivName: "insert"} }
-	| UPDATE    { $$ = &nodes.AccessPriv{PrivName: "update"} }
-	| DELETE_P  { $$ = &nodes.AccessPriv{PrivName: "delete"} }
-	| TRIGGER   { $$ = &nodes.AccessPriv{PrivName: "trigger"} }
-	| EXECUTE   { $$ = &nodes.AccessPriv{PrivName: "execute"} }
-	| TRUNCATE  { $$ = &nodes.AccessPriv{PrivName: "truncate"} }
-	| ColId     { $$ = &nodes.AccessPriv{PrivName: $1} }
+	SELECT opt_column_list
+		{ $$ = &nodes.AccessPriv{PrivName: "select", Cols: $2} }
+	| REFERENCES opt_column_list
+		{ $$ = &nodes.AccessPriv{PrivName: "references", Cols: $2} }
+	| CREATE opt_column_list
+		{ $$ = &nodes.AccessPriv{PrivName: "create", Cols: $2} }
+	| INSERT opt_column_list
+		{ $$ = &nodes.AccessPriv{PrivName: "insert", Cols: $2} }
+	| UPDATE opt_column_list
+		{ $$ = &nodes.AccessPriv{PrivName: "update", Cols: $2} }
+	| DELETE_P opt_column_list
+		{ $$ = &nodes.AccessPriv{PrivName: "delete", Cols: $2} }
+	| TRIGGER opt_column_list
+		{ $$ = &nodes.AccessPriv{PrivName: "trigger", Cols: $2} }
+	| EXECUTE opt_column_list
+		{ $$ = &nodes.AccessPriv{PrivName: "execute", Cols: $2} }
+	| TRUNCATE opt_column_list
+		{ $$ = &nodes.AccessPriv{PrivName: "truncate", Cols: $2} }
+	| ColId opt_column_list
+		{ $$ = &nodes.AccessPriv{PrivName: $1, Cols: $2} }
 	;
 
 grantee_list:
@@ -2456,6 +5966,7 @@ grantee_list:
 
 grantee:
 	RoleSpec { $$ = $1 }
+	| GROUP_P RoleSpec { $$ = $2 }
 	;
 
 RoleSpec:
@@ -3161,11 +6672,12 @@ OptSchemaEltList:
 	;
 
 schema_stmt:
-	CreateStmt      { $$ = $1 }
-	| IndexStmt     { $$ = $1 }
-	| CreateSeqStmt { $$ = $1 }
-	| ViewStmt      { $$ = $1 }
-	| GrantStmt     { $$ = $1 }
+	CreateStmt        { $$ = $1 }
+	| IndexStmt       { $$ = $1 }
+	| CreateSeqStmt   { $$ = $1 }
+	| CreateTrigStmt  { $$ = $1 }
+	| ViewStmt        { $$ = $1 }
+	| GrantStmt       { $$ = $1 }
 	;
 
 /*****************************************************************************
@@ -3214,6 +6726,11 @@ AlterSeqStmt:
 				MissingOk: true,
 			}
 		}
+	;
+
+OptParenthesizedSeqOptList:
+	'(' SeqOptList ')'	{ $$ = $2 }
+	| /* EMPTY */		{ $$ = nil }
 	;
 
 OptSeqOptList:
@@ -3292,6 +6809,37 @@ opt_by:
 	| /* EMPTY */ { /* nothing */ }
 	;
 
+generated_when:
+	ALWAYS      { $$ = int64('a') }
+	| BY DEFAULT { $$ = int64('d') }
+	;
+
+alter_identity_column_option_list:
+	alter_identity_column_option
+		{ $$ = makeList($1) }
+	| alter_identity_column_option_list alter_identity_column_option
+		{ $$ = appendList($1, $2) }
+	;
+
+alter_identity_column_option:
+	RESTART
+		{
+			$$ = makeDefElem("restart", nil)
+		}
+	| RESTART opt_with NumericOnly
+		{
+			$$ = makeDefElem("restart", $3)
+		}
+	| SET SeqOptElem
+		{
+			$$ = $2
+		}
+	| SET GENERATED generated_when
+		{
+			$$ = makeDefElem("generated", makeIntConst($3))
+		}
+	;
+
 /*****************************************************************************
  *
  *      CREATE DOMAIN
@@ -3341,7 +6889,7 @@ AlterDomainStmt:
 				Typname: $3,
 			}
 		}
-	| ALTER DOMAIN_P any_name ADD_P TableConstraint
+	| ALTER DOMAIN_P any_name ADD_P DomainConstraint
 		{
 			$$ = &nodes.AlterDomainStmt{
 				Subtype: 'C',
@@ -3595,7 +7143,7 @@ DefineStmt:
 				Kind:       nodes.OBJECT_AGGREGATE,
 				Oldstyle:   false,
 				Replace:    $2,
-				Defnames:   makeFuncName($4),
+				Defnames:   $4,
 				Args:       $5,
 				Definition: $6,
 			}
@@ -3606,7 +7154,7 @@ DefineStmt:
 				Kind:       nodes.OBJECT_AGGREGATE,
 				Oldstyle:   true,
 				Replace:    $2,
-				Defnames:   makeFuncName($4),
+				Defnames:   $4,
 				Definition: $5,
 			}
 		}
@@ -3941,6 +7489,17 @@ qual_all_Op:
 		}
 	;
 
+qual_Op:
+	Op
+		{
+			$$ = makeList(&nodes.String{Str: $1})
+		}
+	| OPERATOR '(' any_operator ')'
+		{
+			$$ = $3
+		}
+	;
+
 /*****************************************************************************
  *
  *      RoleId and role_list
@@ -4005,6 +7564,18 @@ select_no_parens:
 			insertSelectOptions(n, $2, nil, $3, nil)
 			$$ = n
 		}
+	| select_clause opt_sort_clause for_locking_clause opt_select_limit
+		{
+			n := $1.(*nodes.SelectStmt)
+			insertSelectOptions(n, $2, $3, $4, nil)
+			$$ = n
+		}
+	| select_clause opt_sort_clause select_limit opt_for_locking_clause
+		{
+			n := $1.(*nodes.SelectStmt)
+			insertSelectOptions(n, $2, $4, $3, nil)
+			$$ = n
+		}
 	| with_clause select_clause
 		{
 			n := $2.(*nodes.SelectStmt)
@@ -4024,6 +7595,18 @@ select_no_parens:
 			insertSelectOptions(n, $3, nil, $4, $1.(*nodes.WithClause))
 			$$ = n
 		}
+	| with_clause select_clause opt_sort_clause for_locking_clause opt_select_limit
+		{
+			n := $2.(*nodes.SelectStmt)
+			insertSelectOptions(n, $3, $4, $5, $1.(*nodes.WithClause))
+			$$ = n
+		}
+	| with_clause select_clause opt_sort_clause select_limit opt_for_locking_clause
+		{
+			n := $2.(*nodes.SelectStmt)
+			insertSelectOptions(n, $3, $5, $4, $1.(*nodes.WithClause))
+			$$ = n
+		}
 	;
 
 select_clause:
@@ -4038,41 +7621,53 @@ select_clause:
 	;
 
 simple_select:
-	SELECT opt_all_clause opt_target_list from_clause where_clause group_clause having_clause
+	SELECT opt_all_clause opt_target_list into_clause from_clause where_clause group_clause having_clause window_clause
 		{
 			n := &nodes.SelectStmt{
 				TargetList: $3,
 			}
 			if $4 != nil {
-				n.FromClause = $4
+				n.IntoClause = $4.(*nodes.IntoClause)
 			}
 			if $5 != nil {
-				n.WhereClause = $5
+				n.FromClause = $5
 			}
 			if $6 != nil {
-				n.GroupClause = $6
+				n.WhereClause = $6
 			}
 			if $7 != nil {
-				n.HavingClause = $7
+				n.GroupClause = $7
+			}
+			if $8 != nil {
+				n.HavingClause = $8
+			}
+			if $9 != nil {
+				n.WindowClause = $9
 			}
 			$$ = n
 		}
-	| SELECT distinct_clause target_list from_clause where_clause group_clause having_clause
+	| SELECT distinct_clause target_list into_clause from_clause where_clause group_clause having_clause window_clause
 		{
 			n := &nodes.SelectStmt{
 				TargetList: $3,
 			}
 			if $4 != nil {
-				n.FromClause = $4
+				n.IntoClause = $4.(*nodes.IntoClause)
 			}
 			if $5 != nil {
-				n.WhereClause = $5
+				n.FromClause = $5
 			}
 			if $6 != nil {
-				n.GroupClause = $6
+				n.WhereClause = $6
 			}
 			if $7 != nil {
-				n.HavingClause = $7
+				n.GroupClause = $7
+			}
+			if $8 != nil {
+				n.HavingClause = $8
+			}
+			if $9 != nil {
+				n.WindowClause = $9
 			}
 			// TODO: handle DISTINCT clause
 			$$ = n
@@ -4092,6 +7687,22 @@ simple_select:
 	| values_clause
 		{
 			$$ = $1
+		}
+	| TABLE relation_expr
+		{
+			/* same as SELECT * FROM relation_expr */
+			cr := &nodes.ColumnRef{
+				Fields: &nodes.List{Items: []nodes.Node{&nodes.A_Star{}}},
+				Location: -1,
+			}
+			rt := &nodes.ResTarget{
+				Val:      cr,
+				Location: -1,
+			}
+			$$ = &nodes.SelectStmt{
+				TargetList: makeList(rt),
+				FromClause: makeList($2),
+			}
 		}
 	;
 
@@ -4171,27 +7782,120 @@ cte_list:
 	;
 
 common_table_expr:
-	name opt_name_list AS '(' SelectStmt ')'
+	name opt_name_list AS opt_materialized '(' PreparableStmt ')' opt_search_clause opt_cycle_clause
 		{
-			$$ = &nodes.CommonTableExpr{
-				Ctename:       $1,
-				Aliascolnames: $2,
-				Ctequery:      $5,
+			cte := &nodes.CommonTableExpr{
+				Ctename:         $1,
+				Aliascolnames:   $2,
+				Ctematerialized: int($4),
+				Ctequery:        $6,
+			}
+			if $8 != nil {
+				cte.SearchClause = $8
+			}
+			if $9 != nil {
+				cte.CycleClause = $9
+			}
+			$$ = cte
+		}
+	| name '(' name_list ')' AS opt_materialized '(' PreparableStmt ')' opt_search_clause opt_cycle_clause
+		{
+			cte := &nodes.CommonTableExpr{
+				Ctename:         $1,
+				Aliascolnames:   $3,
+				Ctematerialized: int($6),
+				Ctequery:        $8,
+			}
+			if $10 != nil {
+				cte.SearchClause = $10
+			}
+			if $11 != nil {
+				cte.CycleClause = $11
+			}
+			$$ = cte
+		}
+	;
+
+opt_materialized:
+	MATERIALIZED			{ $$ = int64(nodes.CTEMaterializeAlways) }
+	| NOT MATERIALIZED		{ $$ = int64(nodes.CTEMaterializeNever) }
+	| /* EMPTY */			{ $$ = int64(nodes.CTEMaterializeDefault) }
+	;
+
+opt_search_clause:
+	SEARCH DEPTH FIRST_P BY columnList SET ColId
+		{
+			$$ = &nodes.CTESearchClause{
+				SearchColList:      $5,
+				SearchBreadthFirst: false,
+				SearchSeqColumn:    $7,
+				Location:           -1,
 			}
 		}
-	| name '(' name_list ')' AS '(' SelectStmt ')'
+	| SEARCH BREADTH FIRST_P BY columnList SET ColId
 		{
-			$$ = &nodes.CommonTableExpr{
-				Ctename:       $1,
-				Aliascolnames: $3,
-				Ctequery:      $7,
+			$$ = &nodes.CTESearchClause{
+				SearchColList:      $5,
+				SearchBreadthFirst: true,
+				SearchSeqColumn:    $7,
+				Location:           -1,
 			}
 		}
+	| /* EMPTY */ { $$ = nil }
+	;
+
+opt_cycle_clause:
+	CYCLE columnList SET ColId TO AexprConst DEFAULT AexprConst USING ColId
+		{
+			$$ = &nodes.CTECycleClause{
+				CycleColList:     $2,
+				CycleMarkColumn:  $4,
+				CycleMarkValue:   $6,
+				CycleMarkDefault: $8,
+				CyclePathColumn:  $10,
+				Location:         -1,
+			}
+		}
+	| CYCLE columnList SET ColId USING ColId
+		{
+			$$ = &nodes.CTECycleClause{
+				CycleColList:     $2,
+				CycleMarkColumn:  $4,
+				CycleMarkValue:   makeBoolAConst(1),
+				CycleMarkDefault: makeBoolAConst(0),
+				CyclePathColumn:  $6,
+				Location:         -1,
+			}
+		}
+	| /* EMPTY */ { $$ = nil }
 	;
 
 opt_target_list:
 	target_list { $$ = $1 }
 	| /* EMPTY */ { $$ = nil }
+	;
+
+into_clause:
+	INTO OptTempTableName
+		{
+			$$ = &nodes.IntoClause{
+				Rel:            $2.(*nodes.RangeVar),
+				OnCommit:       nodes.ONCOMMIT_NOOP,
+			}
+		}
+	| /* EMPTY */ { $$ = nil }
+	;
+
+OptTempTableName:
+	TEMPORARY opt_table qualified_name  { rv := makeRangeVar($3); rv.(*nodes.RangeVar).Relpersistence = 't'; $$ = rv }
+	| TEMP opt_table qualified_name     { rv := makeRangeVar($3); rv.(*nodes.RangeVar).Relpersistence = 't'; $$ = rv }
+	| LOCAL TEMPORARY opt_table qualified_name  { rv := makeRangeVar($4); rv.(*nodes.RangeVar).Relpersistence = 't'; $$ = rv }
+	| LOCAL TEMP opt_table qualified_name  { rv := makeRangeVar($4); rv.(*nodes.RangeVar).Relpersistence = 't'; $$ = rv }
+	| GLOBAL TEMPORARY opt_table qualified_name  { rv := makeRangeVar($4); rv.(*nodes.RangeVar).Relpersistence = 't'; $$ = rv }
+	| GLOBAL TEMP opt_table qualified_name  { rv := makeRangeVar($4); rv.(*nodes.RangeVar).Relpersistence = 't'; $$ = rv }
+	| UNLOGGED opt_table qualified_name  { rv := makeRangeVar($3); rv.(*nodes.RangeVar).Relpersistence = 'u'; $$ = rv }
+	| TABLE qualified_name  { $$ = makeRangeVar($2) }
+	| qualified_name        { $$ = makeRangeVar($1) }
 	;
 
 target_list:
@@ -4257,31 +7961,100 @@ table_ref:
 	relation_expr opt_alias_clause
 		{
 			rv := $1.(*nodes.RangeVar)
-			if $2 != "" {
-				rv.Alias = &nodes.Alias{Aliasname: $2}
+			if $2 != nil {
+				rv.Alias = $2.(*nodes.Alias)
 			}
 			$$ = rv
 		}
 	| select_with_parens opt_alias_clause
 		{
-			$$ = &nodes.RangeSubselect{
+			n := &nodes.RangeSubselect{
 				Subquery: $1,
 			}
-			if $2 != "" {
-				$$.(*nodes.RangeSubselect).Alias = &nodes.Alias{Aliasname: $2}
+			if $2 != nil {
+				n.Alias = $2.(*nodes.Alias)
 			}
+			$$ = n
 		}
 	| joined_table
 		{
 			$$ = $1
 		}
+	| relation_expr opt_alias_clause tablesample_clause
+		{
+			rv := $1.(*nodes.RangeVar)
+			if $2 != nil {
+				rv.Alias = $2.(*nodes.Alias)
+			}
+			n := $3.(*nodes.RangeTableSample)
+			n.Relation = rv
+			$$ = n
+		}
+	| func_table func_alias_clause
+		{
+			n := $1.(*nodes.RangeFunction)
+			setFuncAlias(n, $2)
+			$$ = n
+		}
+	| LATERAL_P func_table func_alias_clause
+		{
+			n := $2.(*nodes.RangeFunction)
+			n.Lateral = true
+			setFuncAlias(n, $3)
+			$$ = n
+		}
+	| LATERAL_P select_with_parens opt_alias_clause
+		{
+			n := &nodes.RangeSubselect{
+				Lateral:  true,
+				Subquery: $2,
+			}
+			if $3 != nil {
+				n.Alias = $3.(*nodes.Alias)
+			}
+			$$ = n
+		}
 	| '(' joined_table ')' opt_alias_clause
 		{
 			j := $2.(*nodes.JoinExpr)
-			if $4 != "" {
-				j.Alias = &nodes.Alias{Aliasname: $4}
+			if $4 != nil {
+				j.Alias = $4.(*nodes.Alias)
 			}
 			$$ = j
+		}
+	| xmltable opt_alias_clause
+		{
+			n := $1.(*nodes.RangeTableFunc)
+			if $2 != nil {
+				n.Alias = $2.(*nodes.Alias)
+			}
+			$$ = n
+		}
+	| LATERAL_P xmltable opt_alias_clause
+		{
+			n := $2.(*nodes.RangeTableFunc)
+			n.Lateral = true
+			if $3 != nil {
+				n.Alias = $3.(*nodes.Alias)
+			}
+			$$ = n
+		}
+	| json_table opt_alias_clause
+		{
+			n := $1.(*nodes.JsonTable)
+			if $2 != nil {
+				n.Alias = $2.(*nodes.Alias)
+			}
+			$$ = n
+		}
+	| LATERAL_P json_table opt_alias_clause
+		{
+			n := $2.(*nodes.JsonTable)
+			n.Lateral = true
+			if $3 != nil {
+				n.Alias = $3.(*nodes.Alias)
+			}
+			$$ = n
 		}
 	;
 
@@ -4303,13 +8076,7 @@ joined_table:
 				Larg:      $1,
 				Rarg:      $4,
 			}
-			if $5 != nil {
-				if list, ok := $5.(*nodes.List); ok {
-					n.UsingClause = list
-				} else {
-					n.Quals = $5
-				}
-			}
+			setJoinQual(n, $5)
 			$$ = n
 		}
 	| table_ref JOIN table_ref join_qual
@@ -4320,13 +8087,7 @@ joined_table:
 				Larg:      $1,
 				Rarg:      $3,
 			}
-			if $4 != nil {
-				if list, ok := $4.(*nodes.List); ok {
-					n.UsingClause = list
-				} else {
-					n.Quals = $4
-				}
-			}
+			setJoinQual(n, $4)
 			$$ = n
 		}
 	| table_ref NATURAL join_type JOIN table_ref
@@ -4364,14 +8125,27 @@ opt_outer:
 	;
 
 join_qual:
-	USING '(' name_list ')'
+	USING '(' name_list ')' join_using_alias
 		{
-			$$ = $3
+			/* Wrap USING clause info in a List: [nameList, alias?] */
+			if $5 != nil {
+				$$ = makeList2($3, $5)
+			} else {
+				$$ = $3
+			}
 		}
 	| ON a_expr
 		{
 			$$ = $2
 		}
+	;
+
+join_using_alias:
+	AS ColId
+		{
+			$$ = &nodes.Alias{Aliasname: $2}
+		}
+	| /* EMPTY */ { $$ = nil }
 	;
 
 relation_expr:
@@ -4395,12 +8169,108 @@ relation_expr:
 
 opt_alias_clause:
 	alias_clause { $$ = $1 }
-	| /* EMPTY */ { $$ = "" }
+	| /* EMPTY */ { $$ = nil }
+	;
+
+func_alias_clause:
+	alias_clause { $$ = $1 }
+	| AS '(' TableFuncElementList ')'
+		{
+			$$ = &nodes.List{Items: []nodes.Node{nil, $3}}
+		}
+	| AS ColId '(' TableFuncElementList ')'
+		{
+			$$ = &nodes.List{Items: []nodes.Node{
+				&nodes.Alias{Aliasname: $2},
+				$4,
+			}}
+		}
+	| ColId '(' TableFuncElementList ')'
+		{
+			$$ = &nodes.List{Items: []nodes.Node{
+				&nodes.Alias{Aliasname: $1},
+				$3,
+			}}
+		}
+	| /* EMPTY */ { $$ = nil }
 	;
 
 alias_clause:
-	AS ColId { $$ = $2 }
-	| ColId { $$ = $1 }
+	AS ColId '(' name_list ')'
+		{
+			$$ = &nodes.Alias{Aliasname: $2, Colnames: $4}
+		}
+	| AS ColId
+		{
+			$$ = &nodes.Alias{Aliasname: $2}
+		}
+	| ColId '(' name_list ')'
+		{
+			$$ = &nodes.Alias{Aliasname: $1, Colnames: $3}
+		}
+	| ColId
+		{
+			$$ = &nodes.Alias{Aliasname: $1}
+		}
+	;
+
+func_table:
+	func_expr_windowless opt_ordinality
+		{
+			$$ = &nodes.RangeFunction{
+				Ordinality: $2,
+				Functions:  makeList(makeList($1)),
+			}
+		}
+	| ROWS FROM '(' rowsfrom_list ')' opt_ordinality
+		{
+			$$ = &nodes.RangeFunction{
+				IsRowsfrom: true,
+				Ordinality: $6,
+				Functions:  $4,
+			}
+		}
+	;
+
+rowsfrom_list:
+	rowsfrom_item
+		{ $$ = makeList($1) }
+	| rowsfrom_list ',' rowsfrom_item
+		{ $$ = appendList($1, $3) }
+	;
+
+rowsfrom_item:
+	func_expr_windowless opt_col_def_list
+		{
+			$$ = makeList2($1, $2)
+		}
+	;
+
+opt_col_def_list:
+	AS '(' TableFuncElementList ')'  { $$ = $3 }
+	| /* EMPTY */                    { $$ = nil }
+	;
+
+opt_ordinality:
+	WITH ORDINALITY		{ $$ = true }
+	| /* EMPTY */		{ $$ = false }
+	;
+
+tablesample_clause:
+	TABLESAMPLE func_name '(' expr_list ')' opt_repeatable_clause
+		{
+			$$ = &nodes.RangeTableSample{
+				Method: $2,
+				Args:   $4,
+				Repeatable: $6,
+				Location: -1,
+			}
+		}
+	;
+
+opt_repeatable_clause:
+	REPEATABLE '(' a_expr ')'	{ $$ = $3 }
+	| /* EMPTY */				{ $$ = nil }
 	;
 
 // WHERE clause
@@ -4409,9 +8279,20 @@ where_clause:
 	| /* EMPTY */ { $$ = nil }
 	;
 
+where_or_current_clause:
+	WHERE a_expr { $$ = $2 }
+	| WHERE CURRENT_P OF cursor_name
+		{
+			$$ = &nodes.CurrentOfExpr{
+				CursorName: $4,
+			}
+		}
+	| /* EMPTY */ { $$ = nil }
+	;
+
 // GROUP BY clause
 group_clause:
-	GROUP_P BY group_by_list { $$ = $3 }
+	GROUP_P BY set_quantifier group_by_list { $$ = $4 }
 	| /* EMPTY */ { $$ = nil }
 	;
 
@@ -4424,6 +8305,38 @@ group_by_list:
 
 group_by_item:
 	a_expr { $$ = $1 }
+	| empty_grouping_set { $$ = $1 }
+	| cube_clause { $$ = $1 }
+	| rollup_clause { $$ = $1 }
+	| grouping_sets_clause { $$ = $1 }
+	;
+
+empty_grouping_set:
+	'(' ')'
+		{
+			$$ = &nodes.GroupingSet{Kind: nodes.GROUPING_SET_EMPTY, Location: -1}
+		}
+	;
+
+cube_clause:
+	CUBE '(' expr_list ')'
+		{
+			$$ = &nodes.GroupingSet{Kind: nodes.GROUPING_SET_CUBE, Content: $3, Location: -1}
+		}
+	;
+
+rollup_clause:
+	ROLLUP '(' expr_list ')'
+		{
+			$$ = &nodes.GroupingSet{Kind: nodes.GROUPING_SET_ROLLUP, Content: $3, Location: -1}
+		}
+	;
+
+grouping_sets_clause:
+	GROUPING SETS '(' group_by_list ')'
+		{
+			$$ = &nodes.GroupingSet{Kind: nodes.GROUPING_SET_SETS, Content: $4, Location: -1}
+		}
 	;
 
 // HAVING clause
@@ -4454,11 +8367,21 @@ sortby_list:
 	;
 
 sortby:
-	a_expr opt_asc_desc
+	a_expr USING qual_all_Op opt_nulls_order
 		{
 			$$ = &nodes.SortBy{
-				Node:      $1,
-				SortbyDir: nodes.SortByDir($2),
+				Node:        $1,
+				SortbyDir:   nodes.SORTBY_USING,
+				SortbyNulls: nodes.SortByNulls($4),
+				UseOp:       $3,
+			}
+		}
+	| a_expr opt_asc_desc opt_nulls_order
+		{
+			$$ = &nodes.SortBy{
+				Node:        $1,
+				SortbyDir:   nodes.SortByDir($2),
+				SortbyNulls: nodes.SortByNulls($3),
 			}
 		}
 	;
@@ -4583,6 +8506,58 @@ select_fetch_first_value:
 		}
 	;
 
+opt_select_limit:
+	select_limit		{ $$ = $1 }
+	| /* EMPTY */		{ $$ = nil }
+	;
+
+/*
+ * Locking clause (FOR UPDATE/SHARE etc)
+ */
+for_locking_clause:
+	for_locking_items		{ $$ = $1 }
+	| FOR READ ONLY			{ $$ = nil }
+	;
+
+opt_for_locking_clause:
+	for_locking_clause		{ $$ = $1 }
+	| /* EMPTY */			{ $$ = nil }
+	;
+
+for_locking_items:
+	for_locking_item						{ $$ = makeList($1) }
+	| for_locking_items for_locking_item	{ $$ = appendList($1, $2) }
+	;
+
+for_locking_item:
+	for_locking_strength locked_rels_list opt_nowait_or_skip
+		{
+			$$ = &nodes.LockingClause{
+				LockedRels: $2,
+				Strength:   int($1),
+				WaitPolicy: int($3),
+			}
+		}
+	;
+
+for_locking_strength:
+	FOR UPDATE				{ $$ = int64(nodes.LCS_FORUPDATE) }
+	| FOR NO KEY UPDATE		{ $$ = int64(nodes.LCS_FORNOKEYUPDATE) }
+	| FOR SHARE				{ $$ = int64(nodes.LCS_FORSHARE) }
+	| FOR KEY SHARE			{ $$ = int64(nodes.LCS_FORKEYSHARE) }
+	;
+
+locked_rels_list:
+	OF qualified_name_list	{ $$ = $2 }
+	| /* EMPTY */			{ $$ = nil }
+	;
+
+opt_nowait_or_skip:
+	NOWAIT					{ $$ = int64(nodes.LockWaitError) }
+	| SKIP LOCKED			{ $$ = int64(nodes.LockWaitSkip) }
+	| /* EMPTY */			{ $$ = int64(nodes.LockWaitBlock) }
+	;
+
 // Expressions
 a_expr:
 	c_expr { $$ = $1 }
@@ -4634,6 +8609,14 @@ a_expr:
 		{
 			$$ = makeAExpr(nodes.AEXPR_OP, "<>", $1, $3)
 		}
+	| a_expr qual_Op a_expr				%prec Op
+		{
+			$$ = makeAExprFromList(nodes.AEXPR_OP, $2, $1, $3)
+		}
+	| qual_Op a_expr					%prec Op
+		{
+			$$ = makeAExprFromList(nodes.AEXPR_OP, $1, nil, $2)
+		}
 	| a_expr AND a_expr
 		{
 			$$ = makeBoolExpr(nodes.AND_EXPR, $1, $3)
@@ -4643,6 +8626,10 @@ a_expr:
 			$$ = makeBoolExpr(nodes.OR_EXPR, $1, $3)
 		}
 	| NOT a_expr
+		{
+			$$ = makeBoolExpr(nodes.NOT_EXPR, $2, nil)
+		}
+	| NOT_LA a_expr							%prec NOT
 		{
 			$$ = makeBoolExpr(nodes.NOT_EXPR, $2, nil)
 		}
@@ -4674,27 +8661,268 @@ a_expr:
 				Booltesttype: nodes.IS_FALSE,
 			}
 		}
-	| a_expr LIKE a_expr
+	| a_expr IS NOT TRUE_P                     %prec IS
+		{
+			$$ = &nodes.BooleanTest{
+				Arg:          $1,
+				Booltesttype: nodes.IS_NOT_TRUE,
+			}
+		}
+	| a_expr IS NOT FALSE_P                    %prec IS
+		{
+			$$ = &nodes.BooleanTest{
+				Arg:          $1,
+				Booltesttype: nodes.IS_NOT_FALSE,
+			}
+		}
+	| a_expr IS UNKNOWN                        %prec IS
+		{
+			$$ = &nodes.BooleanTest{
+				Arg:          $1,
+				Booltesttype: nodes.IS_UNKNOWN,
+			}
+		}
+	| a_expr IS NOT UNKNOWN                    %prec IS
+		{
+			$$ = &nodes.BooleanTest{
+				Arg:          $1,
+				Booltesttype: nodes.IS_NOT_UNKNOWN,
+			}
+		}
+	| a_expr ISNULL
+		{
+			$$ = &nodes.NullTest{
+				Arg:          $1,
+				Nulltesttype: nodes.IS_NULL,
+			}
+		}
+	| a_expr NOTNULL
+		{
+			$$ = &nodes.NullTest{
+				Arg:          $1,
+				Nulltesttype: nodes.IS_NOT_NULL,
+			}
+		}
+	| a_expr IS DISTINCT FROM a_expr           %prec IS
+		{
+			$$ = makeAExpr(nodes.AEXPR_DISTINCT, "=", $1, $5)
+		}
+	| a_expr IS NOT DISTINCT FROM a_expr       %prec IS
+		{
+			$$ = makeAExpr(nodes.AEXPR_NOT_DISTINCT, "=", $1, $6)
+		}
+	| row OVERLAPS row
+		{
+			/* convert to a function call */
+			var args *nodes.List
+			if r1, ok := $1.(*nodes.RowExpr); ok {
+				args = r1.Args
+			} else {
+				args = makeList($1)
+			}
+			if r2, ok := $3.(*nodes.RowExpr); ok {
+				args = concatLists(args, r2.Args)
+			} else {
+				args = appendList(args, $3)
+			}
+			$$ = &nodes.FuncCall{
+				Funcname:       makeFuncName("overlaps"),
+				Args:           args,
+				FuncFormat:     int(nodes.COERCE_SQL_SYNTAX),
+				Location:       -1,
+			}
+		}
+	| a_expr IS DOCUMENT_P                             %prec IS
+		{
+			$$ = &nodes.XmlExpr{
+				Op:       nodes.IS_DOCUMENT,
+				Args:     makeList($1),
+				Location: -1,
+			}
+		}
+	| a_expr IS NOT DOCUMENT_P                         %prec IS
+		{
+			$$ = makeNotExpr(&nodes.XmlExpr{
+				Op:       nodes.IS_DOCUMENT,
+				Args:     makeList($1),
+				Location: -1,
+			})
+		}
+	| a_expr IS json_predicate_type_constraint json_key_uniqueness_constraint_opt   %prec IS
+		{
+			$$ = &nodes.JsonIsPredicate{
+				Expr:       $1,
+				ItemType:   nodes.JsonValueType($3),
+				UniqueKeys: $4 != 0,
+				Location:   -1,
+			}
+		}
+	| a_expr IS NOT json_predicate_type_constraint json_key_uniqueness_constraint_opt   %prec IS
+		{
+			$$ = makeNotExpr(&nodes.JsonIsPredicate{
+				Expr:       $1,
+				ItemType:   nodes.JsonValueType($4),
+				UniqueKeys: $5 != 0,
+				Location:   -1,
+			})
+		}
+	| a_expr IS unicode_normal_form NORMALIZED                    %prec IS
+		{
+			$$ = &nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "is_normalized"),
+				Args:       makeList2($1, makeStringConst($3)),
+				FuncFormat: int(nodes.COERCE_SQL_SYNTAX),
+				Location:   -1,
+			}
+		}
+	| a_expr IS NOT unicode_normal_form NORMALIZED                %prec IS
+		{
+			$$ = makeNotExpr(&nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "is_normalized"),
+				Args:       makeList2($1, makeStringConst($4)),
+				FuncFormat: int(nodes.COERCE_SQL_SYNTAX),
+				Location:   -1,
+			})
+		}
+	| a_expr IS NORMALIZED                                        %prec IS
+		{
+			$$ = &nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "is_normalized"),
+				Args:       makeList2($1, makeStringConst("NFC")),
+				FuncFormat: int(nodes.COERCE_SQL_SYNTAX),
+				Location:   -1,
+			}
+		}
+	| a_expr IS NOT NORMALIZED                                    %prec IS
+		{
+			$$ = makeNotExpr(&nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "is_normalized"),
+				Args:       makeList2($1, makeStringConst("NFC")),
+				FuncFormat: int(nodes.COERCE_SQL_SYNTAX),
+				Location:   -1,
+			})
+		}
+	| a_expr LIKE a_expr                              %prec LIKE
 		{
 			$$ = makeAExpr(nodes.AEXPR_LIKE, "~~", $1, $3)
 		}
-	| a_expr NOT LIKE a_expr
+	| a_expr LIKE a_expr ESCAPE a_expr                 %prec LIKE
+		{
+			esc := &nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "like_escape"),
+				Args:       makeList2($3, $5),
+				FuncFormat: int(nodes.COERCE_EXPLICIT_CALL),
+				Location:   -1,
+			}
+			$$ = makeAExpr(nodes.AEXPR_LIKE, "~~", $1, esc)
+		}
+	| a_expr NOT_LA LIKE a_expr                        %prec NOT_LA
 		{
 			$$ = makeAExpr(nodes.AEXPR_LIKE, "!~~", $1, $4)
 		}
-	| a_expr ILIKE a_expr
+	| a_expr NOT_LA LIKE a_expr ESCAPE a_expr          %prec NOT_LA
+		{
+			esc := &nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "like_escape"),
+				Args:       makeList2($4, $6),
+				FuncFormat: int(nodes.COERCE_EXPLICIT_CALL),
+				Location:   -1,
+			}
+			$$ = makeAExpr(nodes.AEXPR_LIKE, "!~~", $1, esc)
+		}
+	| a_expr ILIKE a_expr                              %prec ILIKE
 		{
 			$$ = makeAExpr(nodes.AEXPR_ILIKE, "~~*", $1, $3)
 		}
-	| a_expr BETWEEN b_expr AND a_expr
+	| a_expr ILIKE a_expr ESCAPE a_expr                %prec ILIKE
 		{
-			$$ = makeAExpr(nodes.AEXPR_BETWEEN, "BETWEEN", $1, makeBetweenArgs($3, $5))
+			esc := &nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "like_escape"),
+				Args:       makeList2($3, $5),
+				FuncFormat: int(nodes.COERCE_EXPLICIT_CALL),
+				Location:   -1,
+			}
+			$$ = makeAExpr(nodes.AEXPR_ILIKE, "~~*", $1, esc)
+		}
+	| a_expr NOT_LA ILIKE a_expr                       %prec NOT_LA
+		{
+			$$ = makeAExpr(nodes.AEXPR_ILIKE, "!~~*", $1, $4)
+		}
+	| a_expr NOT_LA ILIKE a_expr ESCAPE a_expr         %prec NOT_LA
+		{
+			esc := &nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "like_escape"),
+				Args:       makeList2($4, $6),
+				FuncFormat: int(nodes.COERCE_EXPLICIT_CALL),
+				Location:   -1,
+			}
+			$$ = makeAExpr(nodes.AEXPR_ILIKE, "!~~*", $1, esc)
+		}
+	| a_expr SIMILAR TO a_expr                         %prec SIMILAR
+		{
+			esc := &nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "similar_to_escape"),
+				Args:       makeList($4),
+				FuncFormat: int(nodes.COERCE_EXPLICIT_CALL),
+				Location:   -1,
+			}
+			$$ = makeAExpr(nodes.AEXPR_SIMILAR, "~", $1, esc)
+		}
+	| a_expr SIMILAR TO a_expr ESCAPE a_expr           %prec SIMILAR
+		{
+			esc := &nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "similar_to_escape"),
+				Args:       makeList2($4, $6),
+				FuncFormat: int(nodes.COERCE_EXPLICIT_CALL),
+				Location:   -1,
+			}
+			$$ = makeAExpr(nodes.AEXPR_SIMILAR, "~", $1, esc)
+		}
+	| a_expr NOT_LA SIMILAR TO a_expr                  %prec NOT_LA
+		{
+			esc := &nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "similar_to_escape"),
+				Args:       makeList($5),
+				FuncFormat: int(nodes.COERCE_EXPLICIT_CALL),
+				Location:   -1,
+			}
+			$$ = makeAExpr(nodes.AEXPR_SIMILAR, "!~", $1, esc)
+		}
+	| a_expr NOT_LA SIMILAR TO a_expr ESCAPE a_expr    %prec NOT_LA
+		{
+			esc := &nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "similar_to_escape"),
+				Args:       makeList2($5, $7),
+				FuncFormat: int(nodes.COERCE_EXPLICIT_CALL),
+				Location:   -1,
+			}
+			$$ = makeAExpr(nodes.AEXPR_SIMILAR, "!~", $1, esc)
+		}
+	| a_expr BETWEEN opt_asymmetric b_expr AND a_expr  %prec BETWEEN
+		{
+			$$ = makeAExpr(nodes.AEXPR_BETWEEN, "BETWEEN", $1,
+				&nodes.List{Items: []nodes.Node{$4, $6}})
+		}
+	| a_expr NOT_LA BETWEEN opt_asymmetric b_expr AND a_expr %prec NOT_LA
+		{
+			$$ = makeAExpr(nodes.AEXPR_NOT_BETWEEN, "NOT BETWEEN", $1,
+				&nodes.List{Items: []nodes.Node{$5, $7}})
+		}
+	| a_expr BETWEEN SYMMETRIC b_expr AND a_expr       %prec BETWEEN
+		{
+			$$ = makeAExpr(nodes.AEXPR_BETWEEN_SYM, "BETWEEN SYMMETRIC", $1,
+				&nodes.List{Items: []nodes.Node{$4, $6}})
+		}
+	| a_expr NOT_LA BETWEEN SYMMETRIC b_expr AND a_expr %prec NOT_LA
+		{
+			$$ = makeAExpr(nodes.AEXPR_NOT_BETWEEN_SYM, "NOT BETWEEN SYMMETRIC", $1,
+				&nodes.List{Items: []nodes.Node{$5, $7}})
 		}
 	| a_expr IN_P '(' expr_list ')'
 		{
 			$$ = makeAExpr(nodes.AEXPR_IN, "=", $1, makeListNode($4))
 		}
-	| a_expr NOT IN_P '(' expr_list ')'
+	| a_expr NOT_LA IN_P '(' expr_list ')'             %prec NOT_LA
 		{
 			$$ = makeAExpr(nodes.AEXPR_IN, "<>", $1, makeListNode($5))
 		}
@@ -4707,7 +8935,7 @@ a_expr:
 				Location:    -1,
 			}
 		}
-	| a_expr NOT IN_P select_with_parens
+	| a_expr NOT_LA IN_P select_with_parens            %prec NOT_LA
 		{
 			sublink := &nodes.SubLink{
 				SubLinkType: int(nodes.ANY_SUBLINK),
@@ -4726,6 +8954,45 @@ a_expr:
 				Subselect:   $4,
 				Location:    -1,
 			}
+		}
+	| a_expr subquery_Op sub_type '(' a_expr ')' %prec Op
+		{
+			/* expr op ANY/ALL (expr) — non-subquery form */
+			kind := nodes.AEXPR_OP_ANY
+			if $3 == int64(nodes.ALL_SUBLINK) {
+				kind = nodes.AEXPR_OP_ALL
+			}
+			$$ = makeAExprFromList(kind, $2, $1, $5)
+		}
+	| a_expr COLLATE any_name
+		{
+			$$ = &nodes.CollateClause{
+				Arg:      $1,
+				Collname: $3,
+				Location: -1,
+			}
+		}
+	| a_expr AT TIME ZONE a_expr                       %prec AT
+		{
+			$$ = &nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "timezone"),
+				Args:       makeList2($5, $1),
+				FuncFormat: int(nodes.COERCE_SQL_SYNTAX),
+				Location:   -1,
+			}
+		}
+	| a_expr AT LOCAL                                  %prec AT
+		{
+			$$ = &nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "timezone"),
+				Args:       makeList($1),
+				FuncFormat: int(nodes.COERCE_SQL_SYNTAX),
+				Location:   -1,
+			}
+		}
+	| DEFAULT
+		{
+			$$ = &nodes.SetToDefault{Location: -1}
 		}
 	| a_expr '[' a_expr ']'
 		{
@@ -4763,6 +9030,11 @@ a_expr:
 		}
 	;
 
+opt_asymmetric:
+	ASYMMETRIC  {}
+	| /* EMPTY */ {}
+	;
+
 sub_type:
 	ANY  { $$ = int64(nodes.ANY_SUBLINK) }
 	| SOME { $$ = int64(nodes.ANY_SUBLINK) }
@@ -4781,6 +9053,14 @@ subquery_Op:
 	| NOT_LA LIKE
 		{
 			$$ = makeList(&nodes.String{Str: "!~~"})
+		}
+	| ILIKE
+		{
+			$$ = makeList(&nodes.String{Str: "~~*"})
+		}
+	| NOT_LA ILIKE
+		{
+			$$ = makeList(&nodes.String{Str: "!~~*"})
 		}
 	| '='
 		{
@@ -4892,11 +9172,6 @@ array_expr_list:
 		}
 	;
 
-opt_slice_bound:
-	a_expr { $$ = $1 }
-	| /* EMPTY */ { $$ = nil }
-	;
-
 /*****************************************************************************
  *
  *      ROW expressions
@@ -4961,6 +9236,70 @@ b_expr:
 		{
 			$$ = makeAExpr(nodes.AEXPR_OP, "/", $1, $3)
 		}
+	| b_expr '%' b_expr
+		{
+			$$ = makeAExpr(nodes.AEXPR_OP, "%", $1, $3)
+		}
+	| b_expr '^' b_expr
+		{
+			$$ = makeAExpr(nodes.AEXPR_OP, "^", $1, $3)
+		}
+	| b_expr '<' b_expr
+		{
+			$$ = makeAExpr(nodes.AEXPR_OP, "<", $1, $3)
+		}
+	| b_expr '>' b_expr
+		{
+			$$ = makeAExpr(nodes.AEXPR_OP, ">", $1, $3)
+		}
+	| b_expr '=' b_expr
+		{
+			$$ = makeAExpr(nodes.AEXPR_OP, "=", $1, $3)
+		}
+	| b_expr LESS_EQUALS b_expr
+		{
+			$$ = makeAExpr(nodes.AEXPR_OP, "<=", $1, $3)
+		}
+	| b_expr GREATER_EQUALS b_expr
+		{
+			$$ = makeAExpr(nodes.AEXPR_OP, ">=", $1, $3)
+		}
+	| b_expr NOT_EQUALS b_expr
+		{
+			$$ = makeAExpr(nodes.AEXPR_OP, "<>", $1, $3)
+		}
+	| b_expr qual_Op b_expr					%prec Op
+		{
+			$$ = makeAExprFromList(nodes.AEXPR_OP, $2, $1, $3)
+		}
+	| qual_Op b_expr						%prec Op
+		{
+			$$ = makeAExprFromList(nodes.AEXPR_OP, $1, nil, $2)
+		}
+	| b_expr IS DISTINCT FROM b_expr		%prec IS
+		{
+			$$ = makeAExpr(nodes.AEXPR_DISTINCT, "=", $1, $5)
+		}
+	| b_expr IS NOT DISTINCT FROM b_expr	%prec IS
+		{
+			$$ = makeAExpr(nodes.AEXPR_NOT_DISTINCT, "=", $1, $6)
+		}
+	| b_expr IS DOCUMENT_P					%prec IS
+		{
+			$$ = &nodes.XmlExpr{
+				Op:       nodes.IS_DOCUMENT,
+				Args:     makeList($1),
+				Location: -1,
+			}
+		}
+	| b_expr IS NOT DOCUMENT_P				%prec IS
+		{
+			$$ = makeNotExpr(&nodes.XmlExpr{
+				Op:       nodes.IS_DOCUMENT,
+				Args:     makeList($1),
+				Location: -1,
+			})
+		}
 	| b_expr TYPECAST Typename
 		{
 			$$ = &nodes.TypeCast{
@@ -4982,7 +9321,32 @@ b_expr:
 c_expr:
 	columnref { $$ = $1 }
 	| AexprConst { $$ = $1 }
-	| '(' a_expr ')' { $$ = $2 }
+	| PARAM opt_indirection
+		{
+			p := &nodes.ParamRef{
+				Number:   int($1),
+				Location: -1,
+			}
+			if $2 != nil {
+				$$ = &nodes.A_Indirection{
+					Arg:         p,
+					Indirection: $2,
+				}
+			} else {
+				$$ = p
+			}
+		}
+	| '(' a_expr ')' opt_indirection
+		{
+			if $4 != nil {
+				$$ = &nodes.A_Indirection{
+					Arg:         $2,
+					Indirection: $4,
+				}
+			} else {
+				$$ = $2
+			}
+		}
 	| func_expr { $$ = $1 }
 	| select_with_parens %prec UMINUS
 		{
@@ -5037,45 +9401,1349 @@ c_expr:
 
 // Function expressions
 func_expr:
-	func_application { $$ = $1 }
+	func_application within_group_clause filter_clause over_clause
+		{
+			n := $1.(*nodes.FuncCall)
+			if $2 != nil {
+				n.AggOrder = $2.(*nodes.List)
+				n.AggWithinGroup = true
+			}
+			if $3 != nil {
+				n.AggFilter = $3
+			}
+			if $4 != nil {
+				n.Over = $4
+			}
+			$$ = n
+		}
+	| func_expr_common_subexpr { $$ = $1 }
+	| json_aggregate_func filter_clause over_clause
+		{
+			/* json_aggregate_func returns a node; wrap filter/over if present */
+			n := $1
+			_ = $2
+			_ = $3
+			$$ = n
+		}
+	;
+
+func_expr_windowless:
+	func_application		{ $$ = $1 }
+	| func_expr_common_subexpr	{ $$ = $1 }
+	;
+
+within_group_clause:
+	WITHIN GROUP_P '(' sort_clause ')'	{ $$ = &nodes.List{Items: $4.Items} }
+	| /* EMPTY */						{ $$ = nil }
+	;
+
+filter_clause:
+	FILTER '(' WHERE a_expr ')'		{ $$ = $4 }
+	| /* EMPTY */						{ $$ = nil }
+	;
+
+over_clause:
+	OVER window_specification	{ $$ = $2 }
+	| OVER ColId
+		{
+			$$ = &nodes.WindowDef{
+				Name:         $2,
+				FrameOptions: nodes.FRAMEOPTION_DEFAULTS,
+				Location:     -1,
+			}
+		}
+	| /* EMPTY */				{ $$ = nil }
+	;
+
+window_clause:
+	WINDOW window_definition_list	{ $$ = $2 }
+	| /* EMPTY */					{ $$ = nil }
+	;
+
+window_definition_list:
+	window_definition							{ $$ = makeList($1) }
+	| window_definition_list ',' window_definition	{ $$ = appendList($1, $3) }
+	;
+
+window_definition:
+	ColId AS window_specification
+		{
+			n := $3.(*nodes.WindowDef)
+			n.Name = $1
+			$$ = n
+		}
+	;
+
+window_specification:
+	'(' opt_existing_window_name opt_partition_clause opt_sort_clause opt_frame_clause ')'
+		{
+			n := $5.(*nodes.WindowDef)
+			n.Refname = $2
+			if $3 != nil {
+				n.PartitionClause = $3
+			}
+			if $4 != nil {
+				n.OrderClause = $4
+			}
+			n.Location = -1
+			$$ = n
+		}
+	;
+
+opt_existing_window_name:
+	ColId			{ $$ = $1 }
+	| /* EMPTY */	%prec Op	{ $$ = "" }
+	;
+
+opt_partition_clause:
+	PARTITION BY expr_list	{ $$ = $3 }
+	| /* EMPTY */			{ $$ = nil }
+	;
+
+opt_frame_clause:
+	RANGE frame_extent opt_window_exclusion_clause
+		{
+			n := $2.(*nodes.WindowDef)
+			n.FrameOptions |= nodes.FRAMEOPTION_NONDEFAULT | nodes.FRAMEOPTION_RANGE | int($3)
+			$$ = n
+		}
+	| ROWS frame_extent opt_window_exclusion_clause
+		{
+			n := $2.(*nodes.WindowDef)
+			n.FrameOptions |= nodes.FRAMEOPTION_NONDEFAULT | nodes.FRAMEOPTION_ROWS | int($3)
+			$$ = n
+		}
+	| GROUPS frame_extent opt_window_exclusion_clause
+		{
+			n := $2.(*nodes.WindowDef)
+			n.FrameOptions |= nodes.FRAMEOPTION_NONDEFAULT | nodes.FRAMEOPTION_GROUPS | int($3)
+			$$ = n
+		}
+	| /* EMPTY */
+		{
+			$$ = &nodes.WindowDef{FrameOptions: nodes.FRAMEOPTION_DEFAULTS}
+		}
+	;
+
+frame_extent:
+	frame_bound
+		{
+			n := $1.(*nodes.WindowDef)
+			n.FrameOptions |= nodes.FRAMEOPTION_END_CURRENT_ROW
+			$$ = n
+		}
+	| BETWEEN frame_bound AND frame_bound
+		{
+			n1 := $2.(*nodes.WindowDef)
+			n2 := $4.(*nodes.WindowDef)
+			n1.FrameOptions |= n2.FrameOptions << 1
+			n1.FrameOptions |= nodes.FRAMEOPTION_BETWEEN
+			n1.EndOffset = n2.StartOffset
+			$$ = n1
+		}
+	;
+
+frame_bound:
+	UNBOUNDED PRECEDING
+		{ $$ = &nodes.WindowDef{FrameOptions: nodes.FRAMEOPTION_START_UNBOUNDED_PRECEDING} }
+	| UNBOUNDED FOLLOWING
+		{ $$ = &nodes.WindowDef{FrameOptions: nodes.FRAMEOPTION_START_UNBOUNDED_FOLLOWING} }
+	| CURRENT_P ROW
+		{ $$ = &nodes.WindowDef{FrameOptions: nodes.FRAMEOPTION_START_CURRENT_ROW} }
+	| a_expr PRECEDING
+		{ $$ = &nodes.WindowDef{FrameOptions: nodes.FRAMEOPTION_START_OFFSET_PRECEDING, StartOffset: $1} }
+	| a_expr FOLLOWING
+		{ $$ = &nodes.WindowDef{FrameOptions: nodes.FRAMEOPTION_START_OFFSET_FOLLOWING, StartOffset: $1} }
+	;
+
+opt_window_exclusion_clause:
+	EXCLUDE CURRENT_P ROW		{ $$ = int64(nodes.FRAMEOPTION_EXCLUDE_CURRENT_ROW) }
+	| EXCLUDE GROUP_P			{ $$ = int64(nodes.FRAMEOPTION_EXCLUDE_GROUP) }
+	| EXCLUDE TIES				{ $$ = int64(nodes.FRAMEOPTION_EXCLUDE_TIES) }
+	| EXCLUDE NO OTHERS			{ $$ = 0 }
+	| /* EMPTY */				{ $$ = 0 }
 	;
 
 func_application:
 	func_name '(' ')'
 		{
 			$$ = &nodes.FuncCall{
-				Funcname: &nodes.List{Items: []nodes.Node{&nodes.String{Str: $1}}},
+				Funcname: $1,
 			}
 		}
-	| func_name '(' func_arg_list ')'
+	| func_name '(' func_arg_list opt_sort_clause ')'
+		{
+			n := &nodes.FuncCall{
+				Funcname: $1,
+				Args:     $3,
+			}
+			if $4 != nil {
+				n.AggOrder = $4
+			}
+			$$ = n
+		}
+	| func_name '(' VARIADIC func_arg_expr opt_sort_clause ')'
 		{
 			$$ = &nodes.FuncCall{
-				Funcname: &nodes.List{Items: []nodes.Node{&nodes.String{Str: $1}}},
-				Args:     $3,
+				Funcname:     $1,
+				Args:         makeList($4),
+				FuncVariadic: true,
+				AggOrder:     $5,
+			}
+		}
+	| func_name '(' func_arg_list ',' VARIADIC func_arg_expr opt_sort_clause ')'
+		{
+			$$ = &nodes.FuncCall{
+				Funcname:     $1,
+				Args:         appendList($3, $6),
+				FuncVariadic: true,
+				AggOrder:     $7,
 			}
 		}
 	| func_name '(' '*' ')'
 		{
 			$$ = &nodes.FuncCall{
-				Funcname: &nodes.List{Items: []nodes.Node{&nodes.String{Str: $1}}},
+				Funcname: $1,
 				AggStar:  true,
 			}
 		}
-	| func_name '(' DISTINCT func_arg_list ')'
+	| func_name '(' DISTINCT func_arg_list opt_sort_clause ')'
 		{
 			$$ = &nodes.FuncCall{
-				Funcname:    &nodes.List{Items: []nodes.Node{&nodes.String{Str: $1}}},
+				Funcname:    $1,
 				Args:        $4,
 				AggDistinct: true,
+				AggOrder:    $5,
 			}
 		}
-	| func_name '(' ALL func_arg_list ')'
+	| func_name '(' ALL func_arg_list opt_sort_clause ')'
 		{
-			$$ = &nodes.FuncCall{
-				Funcname: &nodes.List{Items: []nodes.Node{&nodes.String{Str: $1}}},
+			n := &nodes.FuncCall{
+				Funcname: $1,
 				Args:     $4,
 			}
+			if $5 != nil {
+				n.AggOrder = $5
+			}
+			$$ = n
 		}
+	;
+
+/*
+ * func_expr_common_subexpr: SQL-standard special function expressions that
+ * use reserved keywords as function names. These cannot be ordinary function
+ * calls because the keywords would be consumed as part of the syntax.
+ */
+func_expr_common_subexpr:
+	COLLATION FOR '(' a_expr ')'
+		{
+			$$ = &nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "pg_collation_for"),
+				Args:       makeList($4),
+				FuncFormat: int(nodes.COERCE_SQL_SYNTAX),
+				Location:   -1,
+			}
+		}
+	| CURRENT_DATE
+		{
+			$$ = makeSQLValueFunction(nodes.SVFOP_CURRENT_DATE, -1)
+		}
+	| CURRENT_TIME
+		{
+			$$ = makeSQLValueFunction(nodes.SVFOP_CURRENT_TIME, -1)
+		}
+	| CURRENT_TIME '(' Iconst ')'
+		{
+			$$ = makeSQLValueFunction(nodes.SVFOP_CURRENT_TIME_N, int($3))
+		}
+	| CURRENT_TIMESTAMP
+		{
+			$$ = makeSQLValueFunction(nodes.SVFOP_CURRENT_TIMESTAMP, -1)
+		}
+	| CURRENT_TIMESTAMP '(' Iconst ')'
+		{
+			$$ = makeSQLValueFunction(nodes.SVFOP_CURRENT_TIMESTAMP_N, int($3))
+		}
+	| LOCALTIME
+		{
+			$$ = makeSQLValueFunction(nodes.SVFOP_LOCALTIME, -1)
+		}
+	| LOCALTIME '(' Iconst ')'
+		{
+			$$ = makeSQLValueFunction(nodes.SVFOP_LOCALTIME_N, int($3))
+		}
+	| LOCALTIMESTAMP
+		{
+			$$ = makeSQLValueFunction(nodes.SVFOP_LOCALTIMESTAMP, -1)
+		}
+	| LOCALTIMESTAMP '(' Iconst ')'
+		{
+			$$ = makeSQLValueFunction(nodes.SVFOP_LOCALTIMESTAMP_N, int($3))
+		}
+	| CURRENT_ROLE
+		{
+			$$ = makeSQLValueFunction(nodes.SVFOP_CURRENT_ROLE, -1)
+		}
+	| CURRENT_USER
+		{
+			$$ = makeSQLValueFunction(nodes.SVFOP_CURRENT_USER, -1)
+		}
+	| SESSION_USER
+		{
+			$$ = makeSQLValueFunction(nodes.SVFOP_SESSION_USER, -1)
+		}
+	| SYSTEM_USER
+		{
+			$$ = &nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "system_user"),
+				FuncFormat: int(nodes.COERCE_SQL_SYNTAX),
+				Location:   -1,
+			}
+		}
+	| USER
+		{
+			$$ = makeSQLValueFunction(nodes.SVFOP_USER, -1)
+		}
+	| CURRENT_CATALOG
+		{
+			$$ = makeSQLValueFunction(nodes.SVFOP_CURRENT_CATALOG, -1)
+		}
+	| CURRENT_SCHEMA
+		{
+			$$ = makeSQLValueFunction(nodes.SVFOP_CURRENT_SCHEMA, -1)
+		}
+	| CAST '(' a_expr AS Typename ')'
+		{
+			$$ = makeTypeCast($3, $5)
+		}
+	| NULLIF '(' a_expr ',' a_expr ')'
+		{
+			$$ = makeAExpr(nodes.AEXPR_NULLIF, "=", $3, $5)
+		}
+	| COALESCE '(' expr_list ')'
+		{
+			$$ = &nodes.CoalesceExpr{
+				Args:     $3,
+				Location: -1,
+			}
+		}
+	| GREATEST '(' expr_list ')'
+		{
+			$$ = &nodes.MinMaxExpr{
+				Op:       nodes.IS_GREATEST,
+				Args:     $3,
+				Location: -1,
+			}
+		}
+	| LEAST '(' expr_list ')'
+		{
+			$$ = &nodes.MinMaxExpr{
+				Op:       nodes.IS_LEAST,
+				Args:     $3,
+				Location: -1,
+			}
+		}
+	| EXTRACT '(' extract_list ')'
+		{
+			$$ = &nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "extract"),
+				Args:       $3,
+				FuncFormat: int(nodes.COERCE_SQL_SYNTAX),
+				Location:   -1,
+			}
+		}
+	| NORMALIZE '(' a_expr ')'
+		{
+			$$ = &nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "normalize"),
+				Args:       makeList($3),
+				FuncFormat: int(nodes.COERCE_SQL_SYNTAX),
+				Location:   -1,
+			}
+		}
+	| NORMALIZE '(' a_expr ',' unicode_normal_form ')'
+		{
+			$$ = &nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "normalize"),
+				Args:       makeList2($3, makeStringConst($5)),
+				FuncFormat: int(nodes.COERCE_SQL_SYNTAX),
+				Location:   -1,
+			}
+		}
+	| OVERLAY '(' overlay_list ')'
+		{
+			$$ = &nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "overlay"),
+				Args:       $3,
+				FuncFormat: int(nodes.COERCE_SQL_SYNTAX),
+				Location:   -1,
+			}
+		}
+	| POSITION '(' position_list ')'
+		{
+			$$ = &nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "position"),
+				Args:       $3,
+				FuncFormat: int(nodes.COERCE_SQL_SYNTAX),
+				Location:   -1,
+			}
+		}
+	| SUBSTRING '(' substr_list ')'
+		{
+			$$ = &nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "substring"),
+				Args:       $3,
+				FuncFormat: int(nodes.COERCE_SQL_SYNTAX),
+				Location:   -1,
+			}
+		}
+	| TRIM '(' BOTH trim_list ')'
+		{
+			$$ = &nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "btrim"),
+				Args:       $4,
+				FuncFormat: int(nodes.COERCE_SQL_SYNTAX),
+				Location:   -1,
+			}
+		}
+	| TRIM '(' LEADING trim_list ')'
+		{
+			$$ = &nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "ltrim"),
+				Args:       $4,
+				FuncFormat: int(nodes.COERCE_SQL_SYNTAX),
+				Location:   -1,
+			}
+		}
+	| TRIM '(' TRAILING trim_list ')'
+		{
+			$$ = &nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "rtrim"),
+				Args:       $4,
+				FuncFormat: int(nodes.COERCE_SQL_SYNTAX),
+				Location:   -1,
+			}
+		}
+	| TRIM '(' trim_list ')'
+		{
+			$$ = &nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "btrim"),
+				Args:       $3,
+				FuncFormat: int(nodes.COERCE_SQL_SYNTAX),
+				Location:   -1,
+			}
+		}
+	| GROUPING '(' expr_list ')'
+		{
+			$$ = &nodes.GroupingFunc{
+				Args:     $3,
+				Location: -1,
+			}
+		}
+	| XMLCONCAT '(' expr_list ')'
+		{
+			$$ = &nodes.XmlExpr{
+				Op:       nodes.IS_XMLCONCAT,
+				Args:     $3,
+				Location: -1,
+			}
+		}
+	| XMLELEMENT '(' NAME_P ColLabel ')'
+		{
+			$$ = &nodes.XmlExpr{
+				Op:       nodes.IS_XMLELEMENT,
+				Name:     $4,
+				Location: -1,
+			}
+		}
+	| XMLELEMENT '(' NAME_P ColLabel ',' xml_attributes ')'
+		{
+			$$ = &nodes.XmlExpr{
+				Op:        nodes.IS_XMLELEMENT,
+				Name:      $4,
+				NamedArgs: $6,
+				Location:  -1,
+			}
+		}
+	| XMLELEMENT '(' NAME_P ColLabel ',' expr_list ')'
+		{
+			$$ = &nodes.XmlExpr{
+				Op:       nodes.IS_XMLELEMENT,
+				Name:     $4,
+				Args:     $6,
+				Location: -1,
+			}
+		}
+	| XMLELEMENT '(' NAME_P ColLabel ',' xml_attributes ',' expr_list ')'
+		{
+			$$ = &nodes.XmlExpr{
+				Op:        nodes.IS_XMLELEMENT,
+				Name:      $4,
+				NamedArgs: $6,
+				Args:      $8,
+				Location:  -1,
+			}
+		}
+	| XMLEXISTS '(' c_expr xmlexists_argument ')'
+		{
+			/* xmlexists(A PASSING [BY REF] B [BY REF]) is converted to xmlexists(A, B) */
+			$$ = &nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "xmlexists"),
+				Args:       makeList2($3, $4),
+				FuncFormat: int(nodes.COERCE_SQL_SYNTAX),
+				Location:   -1,
+			}
+		}
+	| XMLFOREST '(' xml_attribute_list ')'
+		{
+			$$ = &nodes.XmlExpr{
+				Op:        nodes.IS_XMLFOREST,
+				NamedArgs: $3,
+				Location:  -1,
+			}
+		}
+	| XMLPARSE '(' document_or_content a_expr xml_whitespace_option ')'
+		{
+			x := &nodes.XmlExpr{
+				Op:       nodes.IS_XMLPARSE,
+				Args:     makeList2($4, makeBoolAConst($5)),
+				Xmloption: nodes.XmlOptionType($3),
+				Location: -1,
+			}
+			$$ = x
+		}
+	| XMLPI '(' NAME_P ColLabel ')'
+		{
+			$$ = &nodes.XmlExpr{
+				Op:       nodes.IS_XMLPI,
+				Name:     $4,
+				Location: -1,
+			}
+		}
+	| XMLPI '(' NAME_P ColLabel ',' a_expr ')'
+		{
+			$$ = &nodes.XmlExpr{
+				Op:       nodes.IS_XMLPI,
+				Name:     $4,
+				Args:     makeList($6),
+				Location: -1,
+			}
+		}
+	| XMLROOT '(' a_expr ',' xml_root_version opt_xml_root_standalone ')'
+		{
+			$$ = &nodes.XmlExpr{
+				Op:       nodes.IS_XMLROOT,
+				Args:     &nodes.List{Items: []nodes.Node{$3, $5, $6}},
+				Location: -1,
+			}
+		}
+	| XMLSERIALIZE '(' document_or_content a_expr AS SimpleTypename xml_indent_option ')'
+		{
+			$$ = &nodes.XmlSerialize{
+				Xmloption: nodes.XmlOptionType($3),
+				Expr:      $4,
+				TypeName:  $6,
+				Indent:    $7 != 0,
+				Location:  -1,
+			}
+		}
+	/* SQL/JSON function expressions */
+	| JSON_OBJECT '(' func_arg_list ')'
+		{
+			/* Legacy json_object() function call */
+			$$ = &nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", "json_object"),
+				Args:       $3,
+				FuncFormat: int(nodes.COERCE_EXPLICIT_CALL),
+				Location:   -1,
+			}
+		}
+	| JSON_OBJECT '(' json_name_and_value_list json_object_constructor_null_clause_opt
+		json_key_uniqueness_constraint_opt json_returning_clause_opt ')'
+		{
+			$$ = &nodes.JsonObjectConstructor{
+				Exprs:        $3,
+				Output:       asJsonOutput($6),
+				AbsentOnNull: $4 != 0,
+				UniqueKeys:   $5 != 0,
+				Location:     -1,
+			}
+		}
+	| JSON_OBJECT '(' json_returning_clause_opt ')'
+		{
+			$$ = &nodes.JsonObjectConstructor{
+				Output:   asJsonOutput($3),
+				Location: -1,
+			}
+		}
+	| JSON_ARRAY '(' json_value_expr_list json_array_constructor_null_clause_opt
+		json_returning_clause_opt ')'
+		{
+			$$ = &nodes.JsonArrayConstructor{
+				Exprs:        $3,
+				AbsentOnNull: $4 != 0,
+				Output:       asJsonOutput($5),
+				Location:     -1,
+			}
+		}
+	| JSON_ARRAY '(' select_no_parens json_format_clause_opt json_returning_clause_opt ')'
+		{
+			$$ = &nodes.JsonArrayQueryConstructor{
+				Query:  $3,
+				Output: asJsonOutput($5),
+				Location: -1,
+			}
+		}
+	| JSON_ARRAY '(' json_returning_clause_opt ')'
+		{
+			$$ = &nodes.JsonArrayConstructor{
+				Output:   asJsonOutput($3),
+				Location: -1,
+			}
+		}
+	| JSON '(' json_value_expr json_key_uniqueness_constraint_opt ')'
+		{
+			$$ = &nodes.JsonParseExpr{
+				Expr:       $3.(*nodes.JsonValueExpr),
+				UniqueKeys: $4 != 0,
+				Location:   -1,
+			}
+		}
+	| JSON_SCALAR '(' a_expr ')'
+		{
+			$$ = &nodes.JsonScalarExpr{
+				Expr:     $3,
+				Location: -1,
+			}
+		}
+	| JSON_SERIALIZE '(' json_value_expr json_returning_clause_opt ')'
+		{
+			$$ = &nodes.JsonSerializeExpr{
+				Expr:   $3.(*nodes.JsonValueExpr),
+				Output: asJsonOutput($4),
+				Location: -1,
+			}
+		}
+	| JSON_QUERY '(' json_value_expr ',' a_expr json_passing_clause_opt
+		json_returning_clause_opt json_wrapper_behavior json_quotes_clause_opt
+		json_behavior_clause_opt ')'
+		{
+			onEmpty, onError := splitJsonBehaviorClause($10)
+			$$ = &nodes.JsonFuncExpr{
+				Op:          nodes.JSON_QUERY_OP,
+				ContextItem: $3.(*nodes.JsonValueExpr),
+				Pathspec:    $5,
+				Passing:     $6,
+				Output:      asJsonOutput($7),
+				Wrapper:     nodes.JsonWrapper($8),
+				Quotes:      nodes.JsonQuotes($9),
+				OnEmpty:     onEmpty,
+				OnError:     onError,
+				Location:    -1,
+			}
+		}
+	| JSON_EXISTS '(' json_value_expr ',' a_expr json_passing_clause_opt
+		json_on_error_clause_opt ')'
+		{
+			$$ = &nodes.JsonFuncExpr{
+				Op:          nodes.JSON_EXISTS_OP,
+				ContextItem: $3.(*nodes.JsonValueExpr),
+				Pathspec:    $5,
+				Passing:     $6,
+				OnError:     asJsonBehavior($7),
+				Location:    -1,
+			}
+		}
+	| JSON_VALUE '(' json_value_expr ',' a_expr json_passing_clause_opt
+		json_returning_clause_opt json_behavior_clause_opt ')'
+		{
+			onEmpty, onError := splitJsonBehaviorClause($8)
+			$$ = &nodes.JsonFuncExpr{
+				Op:          nodes.JSON_VALUE_OP,
+				ContextItem: $3.(*nodes.JsonValueExpr),
+				Pathspec:    $5,
+				Passing:     $6,
+				Output:      asJsonOutput($7),
+				OnEmpty:     onEmpty,
+				OnError:     onError,
+				Location:    -1,
+			}
+		}
+	| MERGE_ACTION '(' ')'
+		{
+			$$ = &nodes.FuncCall{
+				Funcname:   makeFuncName("merge_action"),
+				Location:   -1,
+			}
+		}
+	;
+
+/*
+ * Helper rules for func_expr_common_subexpr
+ */
+extract_list:
+	extract_arg FROM a_expr
+		{
+			$$ = makeList2(makeStringConst($1), $3)
+		}
+	;
+
+extract_arg:
+	IDENT       { $$ = $1 }
+	| YEAR_P    { $$ = "year" }
+	| MONTH_P   { $$ = "month" }
+	| DAY_P     { $$ = "day" }
+	| HOUR_P    { $$ = "hour" }
+	| MINUTE_P  { $$ = "minute" }
+	| SECOND_P  { $$ = "second" }
+	| Sconst    { $$ = $1 }
+	;
+
+unicode_normal_form:
+	NFC         { $$ = "NFC" }
+	| NFD       { $$ = "NFD" }
+	| NFKC      { $$ = "NFKC" }
+	| NFKD      { $$ = "NFKD" }
+	;
+
+overlay_list:
+	a_expr PLACING a_expr FROM a_expr FOR a_expr
+		{
+			$$ = &nodes.List{Items: []nodes.Node{$1, $3, $5, $7}}
+		}
+	| a_expr PLACING a_expr FROM a_expr
+		{
+			$$ = &nodes.List{Items: []nodes.Node{$1, $3, $5}}
+		}
+	;
+
+position_list:
+	b_expr IN_P b_expr
+		{
+			/* note: arguments reversed per PG convention */
+			$$ = makeList2($3, $1)
+		}
+	;
+
+substr_list:
+	a_expr FROM a_expr FOR a_expr
+		{
+			$$ = &nodes.List{Items: []nodes.Node{$1, $3, $5}}
+		}
+	| a_expr FOR a_expr FROM a_expr
+		{
+			$$ = &nodes.List{Items: []nodes.Node{$1, $5, $3}}
+		}
+	| a_expr FROM a_expr
+		{
+			$$ = makeList2($1, $3)
+		}
+	| a_expr FOR a_expr
+		{
+			$$ = &nodes.List{Items: []nodes.Node{
+				$1,
+				makeIntConst(1),
+				$3,
+			}}
+		}
+	| a_expr SIMILAR a_expr ESCAPE a_expr
+		{
+			$$ = &nodes.List{Items: []nodes.Node{$1, $3, $5}}
+		}
+	| expr_list
+		{
+			/* comma-separated form: substring(x, 1, 3) */
+			$$ = $1
+		}
+	;
+
+trim_list:
+	a_expr FROM expr_list
+		{
+			$$ = prependList($1, $3)
+		}
+	| FROM expr_list
+		{
+			$$ = $2
+		}
+	| expr_list
+		{
+			$$ = $1
+		}
+	;
+
+/*****************************************************************************
+ *
+ * XML helper rules
+ *
+ *****************************************************************************/
+
+xml_root_version:
+	VERSION_P a_expr
+		{ $$ = $2 }
+	| VERSION_P NO VALUE_P
+		{ $$ = makeNullAConst() }
+	;
+
+opt_xml_root_standalone:
+	',' STANDALONE_P YES_P
+		{ $$ = makeIntConst(int64(nodes.XML_STANDALONE_YES)) }
+	| ',' STANDALONE_P NO
+		{ $$ = makeIntConst(int64(nodes.XML_STANDALONE_NO)) }
+	| ',' STANDALONE_P NO VALUE_P
+		{ $$ = makeIntConst(int64(nodes.XML_STANDALONE_NO_VALUE)) }
+	| /* EMPTY */
+		{ $$ = makeIntConst(int64(nodes.XML_STANDALONE_OMITTED)) }
+	;
+
+xml_attributes:
+	XMLATTRIBUTES '(' xml_attribute_list ')'	{ $$ = $3 }
+	;
+
+xml_attribute_list:
+	xml_attribute_el
+		{ $$ = makeList($1) }
+	| xml_attribute_list ',' xml_attribute_el
+		{ $$ = appendList($1, $3) }
+	;
+
+xml_attribute_el:
+	a_expr AS ColLabel
+		{
+			$$ = &nodes.ResTarget{
+				Name:     $3,
+				Val:      $1,
+				Location: -1,
+			}
+		}
+	| a_expr
+		{
+			$$ = &nodes.ResTarget{
+				Val:      $1,
+				Location: -1,
+			}
+		}
+	;
+
+document_or_content:
+	DOCUMENT_P		{ $$ = int64(nodes.XMLOPTION_DOCUMENT) }
+	| CONTENT_P	{ $$ = int64(nodes.XMLOPTION_CONTENT) }
+	;
+
+xml_indent_option:
+	INDENT			{ $$ = 1 }
+	| NO INDENT		{ $$ = 0 }
+	| /* EMPTY */	{ $$ = 0 }
+	;
+
+xml_whitespace_option:
+	PRESERVE WHITESPACE_P		{ $$ = 1 }
+	| STRIP_P WHITESPACE_P		{ $$ = 0 }
+	| /* EMPTY */				{ $$ = 0 }
+	;
+
+xmlexists_argument:
+	PASSING c_expr
+		{ $$ = $2 }
+	| PASSING c_expr xml_passing_mech
+		{ $$ = $2 }
+	| PASSING xml_passing_mech c_expr
+		{ $$ = $3 }
+	| PASSING xml_passing_mech c_expr xml_passing_mech
+		{ $$ = $3 }
+	;
+
+xml_passing_mech:
+	BY REF_P
+	| BY VALUE_P
+	;
+
+/*****************************************************************************
+ *
+ * XMLTABLE
+ *
+ *****************************************************************************/
+
+xmltable:
+	XMLTABLE '(' c_expr xmlexists_argument COLUMNS xmltable_column_list ')'
+		{
+			$$ = &nodes.RangeTableFunc{
+				Rowexpr:  $3,
+				Docexpr:  $4,
+				Columns:  $6,
+				Location: -1,
+			}
+		}
+	| XMLTABLE '(' XMLNAMESPACES '(' xml_namespace_list ')' ','
+		c_expr xmlexists_argument COLUMNS xmltable_column_list ')'
+		{
+			$$ = &nodes.RangeTableFunc{
+				Rowexpr:    $8,
+				Docexpr:    $9,
+				Columns:    $11,
+				Namespaces: $5,
+				Location:   -1,
+			}
+		}
+	;
+
+xmltable_column_list:
+	xmltable_column_el
+		{ $$ = makeList($1) }
+	| xmltable_column_list ',' xmltable_column_el
+		{ $$ = appendList($1, $3) }
+	;
+
+xmltable_column_el:
+	ColId Typename
+		{
+			$$ = &nodes.RangeTableFuncCol{
+				Colname:  $1,
+				TypeName: $2,
+				Location: -1,
+			}
+		}
+	| ColId Typename xmltable_column_option_list
+		{
+			fc := &nodes.RangeTableFuncCol{
+				Colname:  $1,
+				TypeName: $2,
+				Location: -1,
+			}
+			for _, item := range $3.Items {
+				defel := item.(*nodes.DefElem)
+				switch defel.Defname {
+				case "default":
+					fc.Coldefexpr = defel.Arg
+				case "path":
+					fc.Colexpr = defel.Arg
+				case "__pg__is_not_null":
+					if defel.Arg != nil {
+						if b, ok := defel.Arg.(*nodes.Boolean); ok && b.Boolval {
+							fc.IsNotNull = true
+						}
+					}
+				}
+			}
+			$$ = fc
+		}
+	| ColId FOR ORDINALITY
+		{
+			$$ = &nodes.RangeTableFuncCol{
+				Colname:       $1,
+				ForOrdinality: true,
+				Location:      -1,
+			}
+		}
+	;
+
+xmltable_column_option_list:
+	xmltable_column_option_el
+		{ $$ = makeList($1) }
+	| xmltable_column_option_list xmltable_column_option_el
+		{ $$ = appendList($1, $2) }
+	;
+
+xmltable_column_option_el:
+	IDENT b_expr
+		{
+			$$ = makeDefElem($1, $2)
+		}
+	| DEFAULT b_expr
+		{
+			$$ = makeDefElem("default", $2)
+		}
+	| NOT NULL_P
+		{
+			$$ = makeDefElem("__pg__is_not_null", &nodes.Boolean{Boolval: true})
+		}
+	| NULL_P
+		{
+			$$ = makeDefElem("__pg__is_not_null", &nodes.Boolean{Boolval: false})
+		}
+	| PATH b_expr
+		{
+			$$ = makeDefElem("path", $2)
+		}
+	;
+
+xml_namespace_list:
+	xml_namespace_el
+		{ $$ = makeList($1) }
+	| xml_namespace_list ',' xml_namespace_el
+		{ $$ = appendList($1, $3) }
+	;
+
+xml_namespace_el:
+	b_expr AS ColLabel
+		{
+			$$ = &nodes.ResTarget{
+				Name:     $3,
+				Val:      $1,
+				Location: -1,
+			}
+		}
+	| DEFAULT b_expr
+		{
+			$$ = &nodes.ResTarget{
+				Val:      $2,
+				Location: -1,
+			}
+		}
+	;
+
+/*****************************************************************************
+ *
+ * SQL/JSON helper rules
+ *
+ *****************************************************************************/
+
+json_value_expr:
+	a_expr json_format_clause_opt
+		{
+			$$ = &nodes.JsonValueExpr{
+				RawExpr: $1,
+			}
+		}
+	;
+
+json_format_clause_opt:
+	FORMAT JSON                         { $$ = nil }
+	| FORMAT JSON ENCODING name         { $$ = nil }
+	| /* EMPTY */                       { $$ = nil }
+	;
+
+json_returning_clause_opt:
+	RETURNING Typename json_format_clause_opt
+		{
+			$$ = &nodes.JsonOutput{
+				TypeName: $2,
+			}
+		}
+	| /* EMPTY */
+		{ $$ = nil }
+	;
+
+json_output_clause_opt:
+	json_returning_clause_opt { $$ = $1 }
+	;
+
+json_behavior:
+	DEFAULT a_expr
+		{
+			$$ = &nodes.JsonBehavior{
+				Btype: nodes.JSON_BEHAVIOR_DEFAULT,
+				Expr:  $2,
+				Location: -1,
+			}
+		}
+	| json_behavior_type
+		{
+			$$ = &nodes.JsonBehavior{
+				Btype: nodes.JsonBehaviorType($1),
+				Location: -1,
+			}
+		}
+	;
+
+json_behavior_type:
+	ERROR_P         { $$ = int64(nodes.JSON_BEHAVIOR_ERROR) }
+	| NULL_P        { $$ = int64(nodes.JSON_BEHAVIOR_NULL) }
+	| TRUE_P        { $$ = int64(nodes.JSON_BEHAVIOR_TRUE) }
+	| FALSE_P       { $$ = int64(nodes.JSON_BEHAVIOR_FALSE) }
+	| UNKNOWN       { $$ = int64(nodes.JSON_BEHAVIOR_UNKNOWN) }
+	| EMPTY_P ARRAY { $$ = int64(nodes.JSON_BEHAVIOR_EMPTY_ARRAY) }
+	| EMPTY_P OBJECT_P { $$ = int64(nodes.JSON_BEHAVIOR_EMPTY_OBJECT) }
+	;
+
+json_behavior_clause_opt:
+	json_behavior ON EMPTY_P json_behavior ON ERROR_P
+		{
+			/* Returns a list of 2: [on_empty, on_error] */
+			$$ = &nodes.List{Items: []nodes.Node{$1, $4}}
+		}
+	| json_behavior ON EMPTY_P
+		{
+			$$ = &nodes.List{Items: []nodes.Node{$1, nil}}
+		}
+	| json_behavior ON ERROR_P
+		{
+			$$ = &nodes.List{Items: []nodes.Node{nil, $1}}
+		}
+	| /* EMPTY */
+		{ $$ = nil }
+	;
+
+json_on_error_clause_opt:
+	json_behavior ON ERROR_P
+		{ $$ = $1 }
+	| /* EMPTY */
+		{ $$ = nil }
+	;
+
+json_wrapper_behavior:
+	WITHOUT WRAPPER                 { $$ = int64(nodes.JSW_NONE) }
+	| WITHOUT ARRAY WRAPPER         { $$ = int64(nodes.JSW_NONE) }
+	| WITH WRAPPER                  { $$ = int64(nodes.JSW_UNCONDITIONAL) }
+	| WITH ARRAY WRAPPER            { $$ = int64(nodes.JSW_UNCONDITIONAL) }
+	| WITH CONDITIONAL ARRAY WRAPPER { $$ = int64(nodes.JSW_CONDITIONAL) }
+	| WITH CONDITIONAL WRAPPER      { $$ = int64(nodes.JSW_CONDITIONAL) }
+	| WITH UNCONDITIONAL ARRAY WRAPPER { $$ = int64(nodes.JSW_UNCONDITIONAL) }
+	| WITH UNCONDITIONAL WRAPPER    { $$ = int64(nodes.JSW_UNCONDITIONAL) }
+	| /* EMPTY */                   { $$ = int64(nodes.JSW_UNSPEC) }
+	;
+
+json_quotes_clause_opt:
+	KEEP QUOTES ON SCALAR STRING_P  { $$ = int64(nodes.JS_QUOTES_KEEP) }
+	| KEEP QUOTES                   { $$ = int64(nodes.JS_QUOTES_KEEP) }
+	| OMIT QUOTES ON SCALAR STRING_P { $$ = int64(nodes.JS_QUOTES_OMIT) }
+	| OMIT QUOTES                   { $$ = int64(nodes.JS_QUOTES_OMIT) }
+	| /* EMPTY */                   { $$ = int64(nodes.JS_QUOTES_UNSPEC) }
+	;
+
+json_predicate_type_constraint:
+	JSON       %prec UNBOUNDED      { $$ = int64(nodes.JS_TYPE_ANY) }
+	| JSON VALUE_P                  { $$ = int64(nodes.JS_TYPE_ANY) }
+	| JSON ARRAY                    { $$ = int64(nodes.JS_TYPE_ARRAY) }
+	| JSON OBJECT_P                 { $$ = int64(nodes.JS_TYPE_OBJECT) }
+	| JSON SCALAR                   { $$ = int64(nodes.JS_TYPE_SCALAR) }
+	;
+
+json_key_uniqueness_constraint_opt:
+	WITH UNIQUE KEYS                    { $$ = 1 }
+	| WITH UNIQUE      %prec UNBOUNDED  { $$ = 1 }
+	| WITHOUT UNIQUE KEYS               { $$ = 0 }
+	| WITHOUT UNIQUE   %prec UNBOUNDED  { $$ = 0 }
+	| /* EMPTY */      %prec UNBOUNDED  { $$ = 0 }
+	;
+
+json_name_and_value_list:
+	json_name_and_value
+		{ $$ = makeList($1) }
+	| json_name_and_value_list ',' json_name_and_value
+		{ $$ = appendList($1, $3) }
+	;
+
+json_name_and_value:
+	c_expr VALUE_P json_value_expr
+		{
+			$$ = &nodes.JsonKeyValue{
+				Key:   $1,
+				Value: $3.(*nodes.JsonValueExpr),
+			}
+		}
+	| a_expr ':' json_value_expr
+		{
+			$$ = &nodes.JsonKeyValue{
+				Key:   $1,
+				Value: $3.(*nodes.JsonValueExpr),
+			}
+		}
+	;
+
+json_object_constructor_null_clause_opt:
+	NULL_P ON NULL_P                { $$ = 0 }
+	| ABSENT ON NULL_P              { $$ = 1 }
+	| /* EMPTY */                   { $$ = 0 }
+	;
+
+json_array_constructor_null_clause_opt:
+	NULL_P ON NULL_P                { $$ = 0 }
+	| ABSENT ON NULL_P              { $$ = 1 }
+	| /* EMPTY */                   { $$ = 1 }
+	;
+
+json_value_expr_list:
+	json_value_expr
+		{ $$ = makeList($1) }
+	| json_value_expr_list ',' json_value_expr
+		{ $$ = appendList($1, $3) }
+	;
+
+json_passing_clause_opt:
+	PASSING json_arguments  { $$ = $2 }
+	| /* EMPTY */           { $$ = nil }
+	;
+
+json_arguments:
+	json_argument
+		{ $$ = makeList($1) }
+	| json_arguments ',' json_argument
+		{ $$ = appendList($1, $3) }
+	;
+
+json_argument:
+	json_value_expr AS ColLabel
+		{
+			$$ = &nodes.JsonArgument{
+				Val:  $1.(*nodes.JsonValueExpr),
+				Name: $3,
+			}
+		}
+	;
+
+json_aggregate_func:
+	JSON_OBJECTAGG '(' json_name_and_value json_object_constructor_null_clause_opt
+		json_key_uniqueness_constraint_opt json_returning_clause_opt ')'
+		{
+			$$ = &nodes.JsonObjectAgg{
+				Constructor: &nodes.JsonAggConstructor{
+					Output:   asJsonOutput($6),
+					Location: -1,
+				},
+				Arg:          $3.(*nodes.JsonKeyValue),
+				AbsentOnNull: $4 != 0,
+				UniqueKeys:   $5 != 0,
+			}
+		}
+	| JSON_ARRAYAGG '(' json_value_expr json_array_aggregate_order_by_clause_opt
+		json_array_constructor_null_clause_opt json_returning_clause_opt ')'
+		{
+			$$ = &nodes.JsonArrayAgg{
+				Constructor: &nodes.JsonAggConstructor{
+					Output:    asJsonOutput($6),
+					Agg_order: $4,
+					Location:  -1,
+				},
+				Arg:          $3.(*nodes.JsonValueExpr),
+				AbsentOnNull: $5 != 0,
+			}
+		}
+	;
+
+json_array_aggregate_order_by_clause_opt:
+	ORDER BY sortby_list    { $$ = $3 }
+	| /* EMPTY */           { $$ = nil }
+	;
+
+/*****************************************************************************
+ *
+ * JSON_TABLE
+ *
+ *****************************************************************************/
+
+json_table:
+	JSON_TABLE '('
+		json_value_expr ',' a_expr json_table_path_name_opt
+		json_passing_clause_opt
+		COLUMNS '(' json_table_column_definition_list ')'
+		json_on_error_clause_opt
+	')'
+		{
+			$$ = &nodes.JsonTable{
+				ContextItem: $3.(*nodes.JsonValueExpr),
+				Pathspec: &nodes.JsonTablePathSpec{
+					String:   $5,
+					Name:     $6,
+					Location: -1,
+				},
+				Passing:  $7,
+				Columns:  $10,
+				OnError:  asJsonBehavior($12),
+				Location: -1,
+			}
+		}
+	;
+
+json_table_path_name_opt:
+	AS name         { $$ = $2 }
+	| /* EMPTY */   { $$ = "" }
+	;
+
+json_table_column_definition_list:
+	json_table_column_definition
+		{ $$ = makeList($1) }
+	| json_table_column_definition_list ',' json_table_column_definition
+		{ $$ = appendList($1, $3) }
+	;
+
+json_table_column_definition:
+	ColId FOR ORDINALITY
+		{
+			$$ = &nodes.JsonTableColumn{
+				Coltype:  nodes.JTC_FOR_ORDINALITY,
+				Name:     $1,
+				Location: -1,
+			}
+		}
+	| ColId Typename json_table_column_path_clause_opt
+		json_wrapper_behavior json_quotes_clause_opt
+		json_behavior_clause_opt
+		{
+			onEmpty, onError := splitJsonBehaviorClause($6)
+			$$ = &nodes.JsonTableColumn{
+				Coltype:  nodes.JTC_REGULAR,
+				Name:     $1,
+				TypeName: $2,
+				Pathspec: asJsonTablePathSpec($3),
+				Wrapper:  nodes.JsonWrapper($4),
+				Quotes:   nodes.JsonQuotes($5),
+				OnEmpty:  onEmpty,
+				OnError:  onError,
+				Location: -1,
+			}
+		}
+	| ColId Typename EXISTS json_table_column_path_clause_opt
+		json_on_error_clause_opt
+		{
+			$$ = &nodes.JsonTableColumn{
+				Coltype:  nodes.JTC_EXISTS,
+				Name:     $1,
+				TypeName: $2,
+				Pathspec: asJsonTablePathSpec($4),
+				OnError:  asJsonBehavior($5),
+				Location: -1,
+			}
+		}
+	| NESTED path_opt Sconst json_table_path_name_opt
+		COLUMNS '(' json_table_column_definition_list ')'
+		{
+			$$ = &nodes.JsonTableColumn{
+				Coltype: nodes.JTC_NESTED,
+				Pathspec: &nodes.JsonTablePathSpec{
+					String:   makeStringConst($3),
+					Name:     $4,
+					Location: -1,
+				},
+				Columns:  $7,
+				Location: -1,
+			}
+		}
+	;
+
+json_table_column_path_clause_opt:
+	PATH Sconst
+		{
+			$$ = &nodes.JsonTablePathSpec{
+				String:   makeStringConst($2),
+				Location: -1,
+			}
+		}
+	| /* EMPTY */
+		{ $$ = nil }
+	;
+
+json_table_column_option_list:
+	json_table_column_option_el
+		{ $$ = makeList($1) }
+	| json_table_column_option_list json_table_column_option_el
+		{ $$ = appendList($1, $2) }
+	;
+
+json_table_column_option_el:
+	DEFAULT b_expr
+		{ $$ = makeDefElem("default", $2) }
+	| PATH b_expr
+		{ $$ = makeDefElem("path", $2) }
+	| NOT NULL_P
+		{ $$ = makeDefElem("__pg__is_not_null", &nodes.Boolean{Boolval: true}) }
+	| NULL_P
+		{ $$ = makeDefElem("__pg__is_not_null", &nodes.Boolean{Boolval: false}) }
+	;
+
+path_opt:
+	PATH            { $$ = "" }
+	| /* EMPTY */   { $$ = "" }
 	;
 
 func_arg_list:
@@ -5091,10 +10759,42 @@ func_arg_list:
 
 func_arg_expr:
 	a_expr { $$ = $1 }
+	| param_name COLON_EQUALS a_expr
+		{
+			$$ = &nodes.NamedArgExpr{
+				Name:      $1,
+				Arg:       $3,
+				Argnumber: -1,
+				Location:  -1,
+			}
+		}
+	| param_name EQUALS_GREATER a_expr
+		{
+			$$ = &nodes.NamedArgExpr{
+				Name:      $1,
+				Arg:       $3,
+				Argnumber: -1,
+				Location:  -1,
+			}
+		}
 	;
 
 func_name:
-	ColId { $$ = $1 }
+	type_function_name
+		{
+			$$ = makeList(&nodes.String{Str: $1})
+		}
+	| ColId indirection
+		{
+			/* schema.funcname or catalog.schema.funcname */
+			l := &nodes.List{Items: []nodes.Node{&nodes.String{Str: $1}}}
+			if $2 != nil {
+				for _, item := range $2.Items {
+					l.Items = append(l.Items, item)
+				}
+			}
+			$$ = l
+		}
 	;
 
 columnref:
@@ -5134,6 +10834,19 @@ indirection_el:
 		{
 			$$ = &nodes.A_Star{}
 		}
+	| '[' a_expr ']'
+		{
+			$$ = &nodes.A_Indices{Uidx: $2}
+		}
+	| '[' opt_slice_bound ':' opt_slice_bound ']'
+		{
+			$$ = &nodes.A_Indices{IsSlice: true, Lidx: $2, Uidx: $4}
+		}
+	;
+
+opt_slice_bound:
+	a_expr      { $$ = $1 }
+	| /* EMPTY */ { $$ = nil }
 	;
 
 opt_indirection:
@@ -5184,6 +10897,39 @@ AexprConst:
 	| NULL_P
 		{
 			$$ = &nodes.A_Const{Isnull: true}
+		}
+	| func_name Sconst
+		{
+			/* generic type 'literal' syntax */
+			t := makeTypeNameFromNameList($1).(*nodes.TypeName)
+			$$ = makeStringConstCast($2, t)
+		}
+	| func_name '(' func_arg_list opt_sort_clause ')' Sconst
+		{
+			/* generic syntax with a type modifier */
+			t := makeTypeNameFromNameList($1).(*nodes.TypeName)
+			if $3 != nil {
+				t.Typmods = $3
+			}
+			$$ = makeStringConstCast($6, t)
+		}
+	| ConstTypename Sconst
+		{
+			$$ = makeStringConstCast($2, $1)
+		}
+	| ConstInterval Sconst opt_interval
+		{
+			t := $1
+			if $3 != nil {
+				t.Typmods = $3
+			}
+			$$ = makeStringConstCast($2, t)
+		}
+	| ConstInterval '(' Iconst ')' Sconst
+		{
+			t := $1
+			t.Typmods = makeList2(makeIntConst(int64(nodes.INTERVAL_FULL_RANGE)), makeIntConst($3))
+			$$ = makeStringConstCast($5, t)
 		}
 	;
 
@@ -5296,6 +11042,28 @@ Typename:
 				$$.ArrayBounds = $3
 			}
 		}
+	| SimpleTypename ARRAY '[' Iconst ']'
+		{
+			$$ = $1
+			$$.ArrayBounds = makeList(&nodes.Integer{Ival: $4})
+		}
+	| SETOF SimpleTypename ARRAY '[' Iconst ']'
+		{
+			$$ = $2
+			$$.Setof = true
+			$$.ArrayBounds = makeList(&nodes.Integer{Ival: $5})
+		}
+	| SimpleTypename ARRAY
+		{
+			$$ = $1
+			$$.ArrayBounds = makeList(&nodes.Integer{Ival: -1})
+		}
+	| SETOF SimpleTypename ARRAY
+		{
+			$$ = $2
+			$$.Setof = true
+			$$.ArrayBounds = makeList(&nodes.Integer{Ival: -1})
+		}
 	;
 
 opt_array_bounds:
@@ -5316,8 +11084,23 @@ opt_array_bounds:
 SimpleTypename:
 	GenericType       { $$ = $1 }
 	| Numeric         { $$ = $1 }
+	| Bit             { $$ = $1 }
 	| Character       { $$ = $1 }
+	| ConstDatetime   { $$ = $1 }
+	| ConstInterval opt_interval
+		{
+			$$ = $1
+			if $2 != nil {
+				$$.Typmods = $2
+			}
+		}
+	| ConstInterval '(' Iconst ')'
+		{
+			$$ = $1
+			$$.Typmods = makeList2(makeIntConst(int64(nodes.INTERVAL_FULL_RANGE)), makeIntConst($3))
+		}
 	| BOOLEAN_P       { $$ = makeTypeName("bool") }
+	| JSON            { $$ = makeTypeName("json") }
 	;
 
 GenericType:
@@ -5438,6 +11221,208 @@ Character:
 opt_varying:
 	VARYING { $$ = true }
 	| /* EMPTY */ { $$ = false }
+	;
+
+Bit:
+	BitWithLength		{ $$ = $1 }
+	| BitWithoutLength	{ $$ = $1 }
+	;
+
+BitWithLength:
+	BIT opt_varying '(' expr_list ')'
+		{
+			if $2 {
+				$$ = makeTypeName("varbit")
+			} else {
+				$$ = makeTypeName("bit")
+			}
+			$$.Typmods = $4
+		}
+	;
+
+BitWithoutLength:
+	BIT opt_varying
+		{
+			if $2 {
+				$$ = makeTypeName("varbit")
+			} else {
+				$$ = makeTypeName("bit")
+				$$.Typmods = makeList(makeIntConst(1))
+			}
+		}
+	;
+
+ConstTypename:
+	Numeric				{ $$ = $1 }
+	| ConstBit			{ $$ = $1 }
+	| ConstCharacter	{ $$ = $1 }
+	| ConstDatetime		{ $$ = $1 }
+	| JSON              { $$ = makeTypeName("json") }
+	;
+
+ConstBit:
+	BitWithLength		{ $$ = $1 }
+	| BitWithoutLength
+		{
+			$$ = $1
+			/* ConstBit defaults to unspecified length for BIT */
+		}
+	;
+
+ConstCharacter:
+	CHARACTER opt_varying '(' Iconst ')'
+		{
+			if $2 {
+				$$ = makeTypeName("varchar")
+			} else {
+				$$ = makeTypeName("bpchar")
+			}
+			$$.Typmods = makeList(&nodes.Integer{Ival: $4})
+		}
+	| CHARACTER opt_varying
+		{
+			if $2 {
+				$$ = makeTypeName("varchar")
+			} else {
+				/* ConstCharacter: CHAR without length defaults to unspecified */
+				$$ = makeTypeName("bpchar")
+			}
+		}
+	| CHAR_P opt_varying '(' Iconst ')'
+		{
+			if $2 {
+				$$ = makeTypeName("varchar")
+			} else {
+				$$ = makeTypeName("bpchar")
+			}
+			$$.Typmods = makeList(&nodes.Integer{Ival: $4})
+		}
+	| CHAR_P opt_varying
+		{
+			if $2 {
+				$$ = makeTypeName("varchar")
+			} else {
+				$$ = makeTypeName("bpchar")
+			}
+		}
+	| VARCHAR '(' Iconst ')'
+		{
+			$$ = makeTypeName("varchar")
+			$$.Typmods = makeList(&nodes.Integer{Ival: $3})
+		}
+	| VARCHAR
+		{
+			$$ = makeTypeName("varchar")
+		}
+	;
+
+ConstDatetime:
+	TIMESTAMP '(' Iconst ')' opt_timezone
+		{
+			if $5 {
+				$$ = makeTypeName("timestamptz")
+			} else {
+				$$ = makeTypeName("timestamp")
+			}
+			$$.Typmods = makeList(makeIntConst($3))
+		}
+	| TIMESTAMP opt_timezone
+		{
+			if $2 {
+				$$ = makeTypeName("timestamptz")
+			} else {
+				$$ = makeTypeName("timestamp")
+			}
+		}
+	| TIME '(' Iconst ')' opt_timezone
+		{
+			if $5 {
+				$$ = makeTypeName("timetz")
+			} else {
+				$$ = makeTypeName("time")
+			}
+			$$.Typmods = makeList(makeIntConst($3))
+		}
+	| TIME opt_timezone
+		{
+			if $2 {
+				$$ = makeTypeName("timetz")
+			} else {
+				$$ = makeTypeName("time")
+			}
+		}
+	;
+
+ConstInterval:
+	INTERVAL
+		{
+			$$ = makeTypeName("interval")
+		}
+	;
+
+opt_timezone:
+	WITH_LA TIME ZONE		{ $$ = true }
+	| WITHOUT TIME ZONE		{ $$ = false }
+	| /* EMPTY */			{ $$ = false }
+	;
+
+opt_interval:
+	YEAR_P
+		{ $$ = makeList(makeIntConst(int64(nodes.INTERVAL_MASK_YEAR))) }
+	| MONTH_P
+		{ $$ = makeList(makeIntConst(int64(nodes.INTERVAL_MASK_MONTH))) }
+	| DAY_P
+		{ $$ = makeList(makeIntConst(int64(nodes.INTERVAL_MASK_DAY))) }
+	| HOUR_P
+		{ $$ = makeList(makeIntConst(int64(nodes.INTERVAL_MASK_HOUR))) }
+	| MINUTE_P
+		{ $$ = makeList(makeIntConst(int64(nodes.INTERVAL_MASK_MINUTE))) }
+	| interval_second
+		{ $$ = $1 }
+	| YEAR_P TO MONTH_P
+		{
+			$$ = makeList(makeIntConst(int64(nodes.INTERVAL_MASK_YEAR | nodes.INTERVAL_MASK_MONTH)))
+		}
+	| DAY_P TO HOUR_P
+		{
+			$$ = makeList(makeIntConst(int64(nodes.INTERVAL_MASK_DAY | nodes.INTERVAL_MASK_HOUR)))
+		}
+	| DAY_P TO MINUTE_P
+		{
+			$$ = makeList(makeIntConst(int64(nodes.INTERVAL_MASK_DAY | nodes.INTERVAL_MASK_HOUR | nodes.INTERVAL_MASK_MINUTE)))
+		}
+	| DAY_P TO interval_second
+		{
+			$$ = $3
+			$$.Items[0] = makeIntConst(int64(nodes.INTERVAL_MASK_DAY | nodes.INTERVAL_MASK_HOUR | nodes.INTERVAL_MASK_MINUTE | nodes.INTERVAL_MASK_SECOND))
+		}
+	| HOUR_P TO MINUTE_P
+		{
+			$$ = makeList(makeIntConst(int64(nodes.INTERVAL_MASK_HOUR | nodes.INTERVAL_MASK_MINUTE)))
+		}
+	| HOUR_P TO interval_second
+		{
+			$$ = $3
+			$$.Items[0] = makeIntConst(int64(nodes.INTERVAL_MASK_HOUR | nodes.INTERVAL_MASK_MINUTE | nodes.INTERVAL_MASK_SECOND))
+		}
+	| MINUTE_P TO interval_second
+		{
+			$$ = $3
+			$$.Items[0] = makeIntConst(int64(nodes.INTERVAL_MASK_MINUTE | nodes.INTERVAL_MASK_SECOND))
+		}
+	| /* EMPTY */
+		{ $$ = nil }
+	;
+
+interval_second:
+	SECOND_P
+		{
+			$$ = makeList(makeIntConst(int64(nodes.INTERVAL_MASK_SECOND)))
+		}
+	| SECOND_P '(' Iconst ')'
+		{
+			$$ = makeList2(makeIntConst(int64(nodes.INTERVAL_MASK_SECOND)), makeIntConst($3))
+		}
 	;
 
 /*****************************************************************************
@@ -5770,7 +11755,7 @@ set_rest_more:
 	| XML_P OPTION document_or_content
 		{
 			var val string
-			if $3 == 1 {
+			if $3 == int64(nodes.XMLOPTION_DOCUMENT) {
 				val = "DOCUMENT"
 			} else {
 				val = "CONTENT"
@@ -5898,9 +11883,9 @@ transaction_mode_list:
 		}
 	;
 
-document_or_content:
-	DOCUMENT_P  { $$ = 1 }
-	| CONTENT_P { $$ = 2 }
+transaction_mode_list_or_empty:
+	transaction_mode_list { $$ = $1 }
+	| /* EMPTY */         { $$ = nil }
 	;
 
 /*****************************************************************************
@@ -6037,6 +12022,7 @@ PreparableStmt:
 	| InsertStmt { $$ = $1 }
 	| UpdateStmt { $$ = $1 }
 	| DeleteStmt { $$ = $1 }
+	| MergeStmt  { $$ = $1 }
 	;
 
 ExecuteStmt:
@@ -6312,6 +12298,18 @@ ClusterStmt:
 			}
 			$$ = n
 		}
+	/* backwards compatible syntax from before 8.3 */
+	| CLUSTER opt_verbose name ON qualified_name
+		{
+			n := &nodes.ClusterStmt{
+				Relation:  makeRangeVar($5).(*nodes.RangeVar),
+				Indexname: $3,
+			}
+			if $2 {
+				n.Params = &nodes.List{Items: []nodes.Node{makeDefElem("verbose", nil)}}
+			}
+			$$ = n
+		}
 	;
 
 cluster_index_specification:
@@ -6426,13 +12424,124 @@ CommentStmt:
 				Comment: $6,
 			}
 		}
-	/* TODO: Add COMMENT ON FUNCTION/AGGREGATE/OPERATOR variants in Phase 16 */
+	| COMMENT ON AGGREGATE aggregate_with_argtypes IS comment_text
+		{
+			$$ = &nodes.CommentStmt{
+				Objtype: nodes.OBJECT_AGGREGATE,
+				Object:  $4,
+				Comment: $6,
+			}
+		}
+	| COMMENT ON FUNCTION function_with_argtypes IS comment_text
+		{
+			$$ = &nodes.CommentStmt{
+				Objtype: nodes.OBJECT_FUNCTION,
+				Object:  $4,
+				Comment: $6,
+			}
+		}
+	| COMMENT ON PROCEDURE function_with_argtypes IS comment_text
+		{
+			$$ = &nodes.CommentStmt{
+				Objtype: nodes.OBJECT_PROCEDURE,
+				Object:  $4,
+				Comment: $6,
+			}
+		}
+	| COMMENT ON ROUTINE function_with_argtypes IS comment_text
+		{
+			$$ = &nodes.CommentStmt{
+				Objtype: nodes.OBJECT_ROUTINE,
+				Object:  $4,
+				Comment: $6,
+			}
+		}
+	| COMMENT ON OPERATOR operator_with_argtypes IS comment_text
+		{
+			$$ = &nodes.CommentStmt{
+				Objtype: nodes.OBJECT_OPERATOR,
+				Object:  $4,
+				Comment: $6,
+			}
+		}
 	| COMMENT ON CONSTRAINT name ON any_name IS comment_text
 		{
 			$$ = &nodes.CommentStmt{
 				Objtype: nodes.OBJECT_TABCONSTRAINT,
 				Object:  appendList($6, &nodes.String{Str: $4}),
 				Comment: $8,
+			}
+		}
+	| COMMENT ON CONSTRAINT name ON DOMAIN_P any_name IS comment_text
+		{
+			$$ = &nodes.CommentStmt{
+				Objtype: nodes.OBJECT_DOMCONSTRAINT,
+				Object:  &nodes.List{Items: []nodes.Node{makeTypeNameFromNameList($7), &nodes.String{Str: $4}}},
+				Comment: $9,
+			}
+		}
+	| COMMENT ON object_type_name_on_any_name name ON any_name IS comment_text
+		{
+			$$ = &nodes.CommentStmt{
+				Objtype: nodes.ObjectType($3),
+				Object:  appendList($6, &nodes.String{Str: $4}),
+				Comment: $8,
+			}
+		}
+	| COMMENT ON TRANSFORM FOR Typename LANGUAGE name IS comment_text
+		{
+			$$ = &nodes.CommentStmt{
+				Objtype: nodes.OBJECT_TRANSFORM,
+				Object:  &nodes.List{Items: []nodes.Node{$5, &nodes.String{Str: $7}}},
+				Comment: $9,
+			}
+		}
+	| COMMENT ON OPERATOR CLASS any_name USING name IS comment_text
+		{
+			$$ = &nodes.CommentStmt{
+				Objtype: nodes.OBJECT_OPCLASS,
+				Object:  prependList(&nodes.String{Str: $7}, $5),
+				Comment: $9,
+			}
+		}
+	| COMMENT ON OPERATOR FAMILY any_name USING name IS comment_text
+		{
+			$$ = &nodes.CommentStmt{
+				Objtype: nodes.OBJECT_OPFAMILY,
+				Object:  prependList(&nodes.String{Str: $7}, $5),
+				Comment: $9,
+			}
+		}
+	| COMMENT ON LARGE_P OBJECT_P NumericOnly IS comment_text
+		{
+			$$ = &nodes.CommentStmt{
+				Objtype: nodes.OBJECT_LARGEOBJECT,
+				Object:  $5,
+				Comment: $7,
+			}
+		}
+	| COMMENT ON FOREIGN DATA_P WRAPPER name IS comment_text
+		{
+			$$ = &nodes.CommentStmt{
+				Objtype: nodes.OBJECT_FDW,
+				Object:  &nodes.String{Str: $6},
+				Comment: $8,
+			}
+		}
+	| COMMENT ON CAST '(' Typename AS Typename ')' IS comment_text
+		{
+			$$ = &nodes.CommentStmt{
+				Objtype: nodes.OBJECT_CAST,
+				Object:  &nodes.List{Items: []nodes.Node{$5, $7}},
+				Comment: $10,
+			}
+		}
+	| COMMENT ON EVENT TRIGGER name IS comment_text
+		{
+			$$ = &nodes.CommentStmt{
+				Objtype: nodes.OBJECT_EVENT_TRIGGER,
+				Object:  &nodes.String{Str: $5},
+				Comment: $7,
 			}
 		}
 	;
@@ -6448,6 +12557,14 @@ object_type_name:
 	| ROLE       { $$ = int64(nodes.OBJECT_ROLE) }
 	| TABLESPACE { $$ = int64(nodes.OBJECT_TABLESPACE) }
 	| SUBSCRIPTION { $$ = int64(nodes.OBJECT_SUBSCRIPTION) }
+	| PUBLICATION  { $$ = int64(nodes.OBJECT_PUBLICATION) }
+	| SERVER       { $$ = int64(nodes.OBJECT_FOREIGN_SERVER) }
+	;
+
+object_type_name_on_any_name:
+	POLICY      { $$ = int64(nodes.OBJECT_POLICY) }
+	| RULE      { $$ = int64(nodes.OBJECT_RULE) }
+	| TRIGGER   { $$ = int64(nodes.OBJECT_TRIGGER) }
 	;
 
 /*****************************************************************************
@@ -6733,7 +12850,7 @@ opt_from_in:
  *****************************************************************************/
 
 MergeStmt:
-	opt_with_clause MERGE INTO relation_expr_opt_alias USING table_ref ON a_expr merge_when_list
+	opt_with_clause MERGE INTO relation_expr_opt_alias USING table_ref ON a_expr merge_when_list returning_clause
 		{
 			m := &nodes.MergeStmt{}
 			if $1 != nil {
@@ -6743,6 +12860,7 @@ MergeStmt:
 			m.SourceRelation = $6
 			m.JoinCondition = $8
 			m.MergeWhenClauses = $9
+			m.ReturningList = $10
 			$$ = m
 		}
 	;
@@ -7162,7 +13280,7 @@ function_with_argtypes:
 	func_name func_args
 		{
 			$$ = &nodes.ObjectWithArgs{
-				Objname: makeFuncName($1),
+				Objname: $1,
 				Objargs: extractArgTypes($2),
 			}
 		}
@@ -7213,7 +13331,7 @@ aggregate_with_argtypes:
 	func_name aggr_args
 		{
 			$$ = &nodes.ObjectWithArgs{
-				Objname: makeFuncName($1),
+				Objname: $1,
 				Objargs: extractAggrArgTypes($2),
 			}
 		}
@@ -7287,7 +13405,7 @@ CreateTrigStmt:
 				IsConstraint:   false,
 				Trigname:        $4,
 				Relation:        makeRangeVarFromAnyName($8),
-				Funcname:        makeFuncName($14),
+				Funcname:        $14,
 				Args:            $16,
 				Row:             $10,
 				Timing:          int16($5),
@@ -7321,7 +13439,7 @@ CreateTrigStmt:
 				IsConstraint:   true,
 				Trigname:        $5,
 				Relation:        makeRangeVarFromAnyName($9),
-				Funcname:        makeFuncName($18),
+				Funcname:        $18,
 				Args:            $20,
 				Row:             true,
 				Timing:          int16(nodes.TRIGGER_TYPE_AFTER),
@@ -7514,6 +13632,17 @@ ConstraintAttributeElem:
 	| NO INHERIT          { $$ = int64(nodes.CAS_NO_INHERIT) }
 	;
 
+no_inherit:
+	NO INHERIT            { $$ = true }
+	| /* EMPTY */         { $$ = false }
+	;
+
+opt_unique_null_treatment:
+	NULLS_LA DISTINCT      { $$ = false }
+	| NULLS_LA NOT DISTINCT { $$ = true }
+	| /* EMPTY */           { $$ = false }
+	;
+
 /*****************************************************************************
  *
  *      CREATE EVENT TRIGGER / ALTER EVENT TRIGGER
@@ -7527,7 +13656,7 @@ CreateEventTrigStmt:
 			$$ = &nodes.CreateEventTrigStmt{
 				Trigname:  $4,
 				Eventname: $6,
-				Funcname:  makeFuncName($9),
+				Funcname:  $9,
 			}
 		}
 	| CREATE EVENT TRIGGER name ON ColLabel
@@ -7538,7 +13667,7 @@ CreateEventTrigStmt:
 				Trigname:   $4,
 				Eventname:  $6,
 				Whenclause: $8,
-				Funcname:   makeFuncName($11),
+				Funcname:   $11,
 			}
 		}
 	;
@@ -7960,34 +14089,74 @@ AlterForeignServerStmt:
 CreateForeignTableStmt:
 	CREATE FOREIGN TABLE qualified_name
 	  '(' OptTableElementList ')'
-	  SERVER name create_generic_options
+	  OptInherit SERVER name create_generic_options
 		{
 			rv := makeRangeVar($4)
 			rv.(*nodes.RangeVar).Relpersistence = 'p'
 			$$ = &nodes.CreateForeignTableStmt{
 				Base: nodes.CreateStmt{
-					Relation:    rv.(*nodes.RangeVar),
-					TableElts:   $6,
-					IfNotExists: false,
+					Relation:     rv.(*nodes.RangeVar),
+					TableElts:    $6,
+					InhRelations: $8,
+					IfNotExists:  false,
 				},
-				Servername: $9,
-				Options:    $10,
+				Servername: $10,
+				Options:    $11,
 			}
 		}
 	| CREATE FOREIGN TABLE IF_P NOT EXISTS qualified_name
 	  '(' OptTableElementList ')'
-	  SERVER name create_generic_options
+	  OptInherit SERVER name create_generic_options
 		{
 			rv := makeRangeVar($7)
 			rv.(*nodes.RangeVar).Relpersistence = 'p'
 			$$ = &nodes.CreateForeignTableStmt{
 				Base: nodes.CreateStmt{
-					Relation:    rv.(*nodes.RangeVar),
-					TableElts:   $9,
-					IfNotExists: true,
+					Relation:     rv.(*nodes.RangeVar),
+					TableElts:    $9,
+					InhRelations: $11,
+					IfNotExists:  true,
 				},
-				Servername: $12,
-				Options:    $13,
+				Servername: $13,
+				Options:    $14,
+			}
+		}
+	| CREATE FOREIGN TABLE qualified_name
+	  PARTITION OF qualified_name OptTypedTableElementList ForValues
+	  SERVER name create_generic_options
+		{
+			rv := makeRangeVar($4)
+			inh := makeRangeVar($7)
+			rv.(*nodes.RangeVar).Relpersistence = 'p'
+			$$ = &nodes.CreateForeignTableStmt{
+				Base: nodes.CreateStmt{
+					Relation:     rv.(*nodes.RangeVar),
+					InhRelations: makeList(inh),
+					TableElts:    $8,
+					Partbound:    $9,
+					IfNotExists:  false,
+				},
+				Servername: $11,
+				Options:    $12,
+			}
+		}
+	| CREATE FOREIGN TABLE IF_P NOT EXISTS qualified_name
+	  PARTITION OF qualified_name OptTypedTableElementList ForValues
+	  SERVER name create_generic_options
+		{
+			rv := makeRangeVar($7)
+			inh := makeRangeVar($10)
+			rv.(*nodes.RangeVar).Relpersistence = 'p'
+			$$ = &nodes.CreateForeignTableStmt{
+				Base: nodes.CreateStmt{
+					Relation:     rv.(*nodes.RangeVar),
+					InhRelations: makeList(inh),
+					TableElts:    $11,
+					Partbound:    $12,
+					IfNotExists:  true,
+				},
+				Servername: $14,
+				Options:    $15,
 			}
 		}
 	;
@@ -8614,6 +14783,26 @@ PublicationObjSpec:
 		{
 			$$ = &nodes.PublicationObjSpec{
 				Pubobjtype: nodes.PUBLICATIONOBJ_TABLES_IN_CUR_SCHEMA,
+			}
+		}
+	| relation_expr opt_column_list OptWhereClause
+		{
+			pt := &nodes.PublicationTable{
+				Relation: $1.(*nodes.RangeVar),
+				Columns:  $2,
+			}
+			if $3 != nil {
+				pt.WhereClause = $3.Items[0]
+			}
+			$$ = &nodes.PublicationObjSpec{
+				Pubobjtype: nodes.PUBLICATIONOBJ_CONTINUATION,
+				Pubtable:   pt,
+			}
+		}
+	| CURRENT_SCHEMA
+		{
+			$$ = &nodes.PublicationObjSpec{
+				Pubobjtype: nodes.PUBLICATIONOBJ_CONTINUATION,
 			}
 		}
 	;
@@ -10034,15 +16223,50 @@ CreateAsStmt:
 				IfNotExists: true,
 			}
 		}
+	| CREATE OptTemp TABLE create_as_target AS EXECUTE name execute_param_clause opt_with_data
+		{
+			into := $4.(*nodes.IntoClause)
+			into.Rel.Relpersistence = relpersistenceForTemp($2)
+			into.SkipData = !$9
+			es := &nodes.ExecuteStmt{
+				Name:   $7,
+				Params: $8,
+			}
+			$$ = &nodes.CreateTableAsStmt{
+				Query:       es,
+				Into:        into,
+				Objtype:     nodes.OBJECT_TABLE,
+			}
+		}
+	| CREATE OptTemp TABLE IF_P NOT EXISTS create_as_target AS EXECUTE name execute_param_clause opt_with_data
+		{
+			into := $7.(*nodes.IntoClause)
+			into.Rel.Relpersistence = relpersistenceForTemp($2)
+			into.SkipData = !$12
+			es := &nodes.ExecuteStmt{
+				Name:   $10,
+				Params: $11,
+			}
+			$$ = &nodes.CreateTableAsStmt{
+				Query:       es,
+				Into:        into,
+				Objtype:     nodes.OBJECT_TABLE,
+				IfNotExists: true,
+			}
+		}
 	;
 
 create_as_target:
-	qualified_name opt_column_list
+	qualified_name opt_column_list OptAccessMethod OptWith OnCommitOption OptTableSpace
 		{
 			rv := makeRangeVarFromAnyName($1)
 			$$ = &nodes.IntoClause{
-				Rel:      rv,
-				ColNames: $2,
+				Rel:            rv,
+				ColNames:       $2,
+				AccessMethod:   $3,
+				Options:        $4,
+				OnCommit:       nodes.OnCommitAction($5),
+				TableSpaceName: $6,
 			}
 		}
 	;
@@ -10082,12 +16306,15 @@ CreateMatViewStmt:
 	;
 
 create_mv_target:
-	qualified_name opt_column_list
+	qualified_name opt_column_list OptAccessMethod opt_reloptions OptTableSpace
 		{
 			rv := makeRangeVarFromAnyName($1)
 			$$ = &nodes.IntoClause{
-				Rel:      rv,
-				ColNames: $2,
+				Rel:            rv,
+				ColNames:       $2,
+				AccessMethod:   $3,
+				Options:        $4,
+				TableSpaceName: $5,
 			}
 		}
 	;
@@ -10457,21 +16684,63 @@ col_name_keyword:
 	| BOOLEAN_P
 	| CHAR_P
 	| CHARACTER
+	| COALESCE
 	| DEC
 	| DECIMAL_P
 	| EXISTS
+	| EXTRACT
 	| FLOAT_P
+	| GREATEST
+	| GROUPING
+	| INOUT
 	| INT_P
 	| INTEGER
+	| INTERVAL
 	| JSON
+	| JSON_ARRAY
+	| JSON_ARRAYAGG
+	| JSON_EXISTS
+	| JSON_OBJECT
+	| JSON_OBJECTAGG
+	| JSON_QUERY
+	| JSON_SCALAR
+	| JSON_SERIALIZE
+	| JSON_TABLE
+	| JSON_VALUE
+	| LEAST
+	| MERGE_ACTION
 	| NATIONAL
 	| NCHAR
+	| NONE
+	| NORMALIZE
+	| NULLIF
 	| NUMERIC
+	| OUT_P
+	| OVERLAY
+	| POSITION
 	| PRECISION
 	| REAL
+	| ROW
 	| SETOF
 	| SMALLINT
+	| SUBSTRING
+	| TIME
+	| TIMESTAMP
+	| TREAT
+	| TRIM
+	| VALUES
 	| VARCHAR
+	| XMLATTRIBUTES
+	| XMLCONCAT
+	| XMLELEMENT
+	| XMLEXISTS
+	| XMLFOREST
+	| XMLNAMESPACES
+	| XMLPARSE
+	| XMLPI
+	| XMLROOT
+	| XMLSERIALIZE
+	| XMLTABLE
 	;
 
 type_func_name_keyword:
@@ -10479,6 +16748,7 @@ type_func_name_keyword:
 	| BINARY
 	| COLLATION
 	| CROSS
+	| CURRENT_SCHEMA
 	| FREEZE
 	| FULL
 	| ILIKE
@@ -10678,6 +16948,50 @@ func makeAExpr(kind nodes.A_Expr_Kind, op string, lexpr, rexpr nodes.Node) nodes
 	}
 }
 
+// makeAExprFromList creates an A_Expr with an operator name list (from qual_Op).
+// makeNameListAsAnyNameList wraps each name string into a single-element
+// List (matching PG's any_name format for DropStmt.Objects).
+func makeNameListAsAnyNameList(names *nodes.List) *nodes.List {
+	if names == nil {
+		return nil
+	}
+	result := &nodes.List{}
+	for _, item := range names.Items {
+		result.Items = append(result.Items, &nodes.List{Items: []nodes.Node{item}})
+	}
+	return result
+}
+
+func makeStringConstCast(s string, typeName *nodes.TypeName) nodes.Node {
+	return &nodes.TypeCast{
+		Arg:      &nodes.A_Const{Val: &nodes.String{Str: s}},
+		TypeName: typeName,
+		Location: -1,
+	}
+}
+
+func parsePartitionStrategy(strategy string) string {
+	switch strategy {
+	case "list", "LIST", "List":
+		return "l"
+	case "range", "RANGE", "Range":
+		return "r"
+	case "hash", "HASH", "Hash":
+		return "h"
+	default:
+		return strategy
+	}
+}
+
+func makeAExprFromList(kind nodes.A_Expr_Kind, name *nodes.List, lexpr, rexpr nodes.Node) nodes.Node {
+	return &nodes.A_Expr{
+		Kind:  kind,
+		Name:  name,
+		Lexpr: lexpr,
+		Rexpr: rexpr,
+	}
+}
+
 func makeBoolExpr(boolop nodes.BoolExprType, arg1, arg2 nodes.Node) nodes.Node {
 	be := &nodes.BoolExpr{
 		Boolop: boolop,
@@ -10753,6 +17067,110 @@ func makeStringConst(str string) nodes.Node {
 	return &nodes.A_Const{Val: &nodes.String{Str: str}}
 }
 
+func makeBoolAConst(val int64) nodes.Node {
+	if val != 0 {
+		return &nodes.A_Const{Val: &nodes.String{Str: "t"}}
+	}
+	return &nodes.A_Const{Val: &nodes.String{Str: "f"}}
+}
+
+func makeNullAConst() nodes.Node {
+	return &nodes.A_Const{Isnull: true}
+}
+
+func makeNotExpr(expr nodes.Node) nodes.Node {
+	return &nodes.BoolExpr{
+		Boolop: nodes.NOT_EXPR,
+		Args:   &nodes.List{Items: []nodes.Node{expr}},
+		Location: -1,
+	}
+}
+
+func setFuncAlias(n *nodes.RangeFunction, clause nodes.Node) {
+	if clause == nil {
+		return
+	}
+	// If it's an Alias, just set the alias
+	if alias, ok := clause.(*nodes.Alias); ok {
+		n.Alias = alias
+		return
+	}
+	// If it's a List with [alias, coldeflist], it's a func_alias_clause with column defs
+	if list, ok := clause.(*nodes.List); ok && len(list.Items) == 2 {
+		if alias, ok2 := list.Items[0].(*nodes.Alias); ok2 {
+			n.Alias = alias
+		}
+		if coldeflist, ok2 := list.Items[1].(*nodes.List); ok2 {
+			n.Coldeflist = coldeflist
+		}
+	}
+}
+
+func setJoinQual(n *nodes.JoinExpr, qual nodes.Node) {
+	if qual == nil {
+		return
+	}
+	if list, ok := qual.(*nodes.List); ok {
+		// Check if this is a USING clause with alias: [nameList, alias]
+		if len(list.Items) == 2 {
+			if innerList, ok2 := list.Items[0].(*nodes.List); ok2 {
+				if alias, ok3 := list.Items[1].(*nodes.Alias); ok3 {
+					n.UsingClause = innerList
+					n.JoinUsing = alias
+					return
+				}
+			}
+		}
+		n.UsingClause = list
+	} else {
+		n.Quals = qual
+	}
+}
+
+func makeTypeNameFromNameList(names *nodes.List) nodes.Node {
+	tn := &nodes.TypeName{Location: -1}
+	if names != nil {
+		tn.Names = names
+	}
+	return tn
+}
+
+func asJsonOutput(n nodes.Node) *nodes.JsonOutput {
+	if n == nil {
+		return nil
+	}
+	return n.(*nodes.JsonOutput)
+}
+
+func asJsonBehavior(n nodes.Node) *nodes.JsonBehavior {
+	if n == nil {
+		return nil
+	}
+	return n.(*nodes.JsonBehavior)
+}
+
+func splitJsonBehaviorClause(n nodes.Node) (*nodes.JsonBehavior, *nodes.JsonBehavior) {
+	if n == nil {
+		return nil, nil
+	}
+	list := n.(*nodes.List)
+	var onEmpty, onError *nodes.JsonBehavior
+	if list.Items[0] != nil {
+		onEmpty = list.Items[0].(*nodes.JsonBehavior)
+	}
+	if list.Items[1] != nil {
+		onError = list.Items[1].(*nodes.JsonBehavior)
+	}
+	return onEmpty, onError
+}
+
+func asJsonTablePathSpec(n nodes.Node) *nodes.JsonTablePathSpec {
+	if n == nil {
+		return nil
+	}
+	return n.(*nodes.JsonTablePathSpec)
+}
+
 func doNegateFloat(f *nodes.Float) {
 	if len(f.Fval) > 0 && f.Fval[0] == '-' {
 		f.Fval = f.Fval[1:]
@@ -10770,8 +17188,24 @@ func makeDefElem(name string, arg nodes.Node) nodes.Node {
 }
 
 // makeFuncName converts a function name string to a *nodes.List of String nodes.
-func makeFuncName(name string) *nodes.List {
-	return &nodes.List{Items: []nodes.Node{&nodes.String{Str: name}}}
+// With one argument, creates an unqualified name.
+// With two arguments, creates a schema-qualified name (e.g. "pg_catalog", "func").
+func makeFuncName(parts ...string) *nodes.List {
+	items := make([]nodes.Node, len(parts))
+	for i, p := range parts {
+		items[i] = &nodes.String{Str: p}
+	}
+	return &nodes.List{Items: items}
+}
+
+// makeSQLValueFunction creates a SQLValueFunction node.
+func makeSQLValueFunction(op nodes.SVFOp, typmod int) nodes.Node {
+	return &nodes.SQLValueFunction{Op: op, Typmod: int32(typmod), Location: -1}
+}
+
+// makeTypeCast creates a TypeCast node.
+func makeTypeCast(arg nodes.Node, typeName *nodes.TypeName) nodes.Node {
+	return &nodes.TypeCast{Arg: arg, TypeName: typeName, Location: -1}
 }
 
 // roleSpecOrNil safely casts a node to *nodes.RoleSpec, returning nil if the node is nil.
@@ -10799,6 +17233,55 @@ type importQualification struct {
 }
 
 func (n *importQualification) Tag() nodes.NodeTag { return nodes.T_Invalid }
+
+// splitColQualList separates a list of column qualifiers (constraints and COLLATE)
+// into the ColumnDef's constraints and collClause fields.
+// This matches PostgreSQL's SplitColQualList function.
+func applyConstraintAttrs(n *nodes.Constraint, attrs int64) {
+	if attrs&int64(nodes.CAS_DEFERRABLE) != 0 {
+		n.Deferrable = true
+	}
+	if attrs&int64(nodes.CAS_INITIALLY_DEFERRED) != 0 {
+		n.Initdeferred = true
+		n.Deferrable = true
+	}
+	if attrs&int64(nodes.CAS_NOT_VALID) != 0 {
+		n.SkipValidation = true
+		n.InitiallyValid = false
+	}
+	if attrs&int64(nodes.CAS_NO_INHERIT) != 0 {
+		n.IsNoInherit = true
+	}
+}
+
+func splitColQualList(qualList *nodes.List, coldef *nodes.ColumnDef) {
+	if qualList == nil {
+		return
+	}
+	var constraints []nodes.Node
+	for _, item := range qualList.Items {
+		if cc, ok := item.(*nodes.CollateClause); ok {
+			coldef.CollClause = cc
+		} else if de, ok := item.(*nodes.DefElem); ok && de.Defname == "compression" {
+			if s, ok := de.Arg.(*nodes.String); ok {
+				coldef.Compression = s.Str
+			}
+		} else if de, ok := item.(*nodes.DefElem); ok && de.Defname == "storage" {
+			if s, ok := de.Arg.(*nodes.String); ok {
+				coldef.StorageName = s.Str
+			}
+		} else if de, ok := item.(*nodes.DefElem); ok && de.Defname == "fdwoptions" {
+			if l, ok := de.Arg.(*nodes.List); ok {
+				coldef.Fdwoptions = l
+			}
+		} else {
+			constraints = append(constraints, item)
+		}
+	}
+	if len(constraints) > 0 {
+		coldef.Constraints = &nodes.List{Items: constraints}
+	}
+}
 
 func insertSelectOptions(stmt *nodes.SelectStmt, sortClause *nodes.List, lockingClause *nodes.List,
 	limitClause *SelectLimit, withClause *nodes.WithClause) {

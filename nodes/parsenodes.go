@@ -176,6 +176,17 @@ type AlterTableCmd struct {
 
 func (n *AlterTableCmd) Tag() NodeTag { return T_AlterTableCmd }
 
+// AlterTableMoveAllStmt represents ALTER TABLE/INDEX/MATERIALIZED VIEW ALL IN TABLESPACE.
+type AlterTableMoveAllStmt struct {
+	OrigTablespacename string // source tablespace
+	ObjType            int    // Object type to move
+	Roles              *List  // List of roles to move objects of
+	NewTablespacename  string // target tablespace
+	Nowait             bool
+}
+
+func (n *AlterTableMoveAllStmt) Tag() NodeTag { return T_AlterTableMoveAllStmt }
+
 // CreateSchemaStmt represents a CREATE SCHEMA statement.
 type CreateSchemaStmt struct {
 	Schemaname  string    // the name of the schema to create
@@ -240,6 +251,15 @@ type ResTarget struct {
 
 func (n *ResTarget) Tag() NodeTag { return T_ResTarget }
 
+// MultiAssignRef is an element of a row source expression for UPDATE SET (a,b) = expr.
+type MultiAssignRef struct {
+	Source   Node // the row-valued expression
+	Colno    int  // column number for this target (1..n)
+	Ncolumns int  // number of targets in the construct
+}
+
+func (n *MultiAssignRef) Tag() NodeTag { return T_MultiAssignRef }
+
 // A_Expr represents an expression with an operator.
 type A_Expr struct {
 	Kind     A_Expr_Kind // see above
@@ -285,6 +305,16 @@ type FuncCall struct {
 }
 
 func (n *FuncCall) Tag() NodeTag { return T_FuncCall }
+
+// NamedArgExpr represents a named argument in a function call.
+type NamedArgExpr struct {
+	Arg       Node     // the argument expression
+	Name      string   // the name
+	Argnumber int      // argument's number in positional notation
+	Location  ParseLoc // argument name location, or -1 if unknown
+}
+
+func (n *NamedArgExpr) Tag() NodeTag { return T_NamedArgExpr }
 
 // TypeName represents a data type name.
 type TypeName struct {
@@ -400,6 +430,32 @@ type CommonTableExpr struct {
 
 func (n *CommonTableExpr) Tag() NodeTag { return T_CommonTableExpr }
 
+// CTESearchClause represents the SEARCH clause in a recursive CTE.
+type CTESearchClause struct {
+	SearchColList    *List    // list of column names to search by
+	SearchBreadthFirst bool  // true = BREADTH FIRST, false = DEPTH FIRST
+	SearchSeqColumn  string  // name of the output ordering column
+	Location         ParseLoc
+}
+
+func (n *CTESearchClause) Tag() NodeTag { return T_CTESearchClause }
+
+// CTECycleClause represents the CYCLE clause in a recursive CTE.
+type CTECycleClause struct {
+	CycleColList     *List    // list of column names to check for cycles
+	CycleMarkColumn  string   // name of the cycle mark column
+	CycleMarkValue   Node     // value for cycle mark (default TRUE)
+	CycleMarkDefault Node     // default for cycle mark (default FALSE)
+	CyclePathColumn  string   // name of the cycle path column
+	CycleMarkType    Oid      // type of the cycle mark column
+	CycleMarkTypmod  int32
+	CycleMarkCollation Oid
+	CycleMarkNeop    Oid
+	Location         ParseLoc
+}
+
+func (n *CTECycleClause) Tag() NodeTag { return T_CTECycleClause }
+
 // RoleSpec represents a role specification.
 type RoleSpec struct {
 	Roletype int      // type of role (RoleSpecType)
@@ -426,6 +482,40 @@ type PartitionSpec struct {
 }
 
 func (n *PartitionSpec) Tag() NodeTag { return T_PartitionSpec }
+
+// PartitionElem represents a single partition key element.
+type PartitionElem struct {
+	Name      string   // name of column to partition on, or ""
+	Expr      Node     // expression to partition on, or nil
+	Collation *List    // name of collation; nil = default
+	Opclass   *List    // name of desired opclass; nil = default
+	Location  ParseLoc // token location, or -1 if unknown
+}
+
+func (n *PartitionElem) Tag() NodeTag { return T_PartitionElem }
+
+// PartitionBoundSpec represents a partition bound specification.
+type PartitionBoundSpec struct {
+	Strategy    byte  // PARTITION_STRATEGY_* code
+	IsDefault   bool  // is it a default partition bound?
+	Modulus     int   // hash partition modulus
+	Remainder   int   // hash partition remainder
+	Listdatums  *List // list of Consts (or Exprs) for LIST
+	Lowerdatums *List // list of Consts (or Exprs) for RANGE lower
+	Upperdatums *List // list of Consts (or Exprs) for RANGE upper
+	Location    ParseLoc
+}
+
+func (n *PartitionBoundSpec) Tag() NodeTag { return T_PartitionBoundSpec }
+
+// PartitionCmd represents ALTER TABLE ATTACH/DETACH PARTITION.
+type PartitionCmd struct {
+	Name       *RangeVar           // partition to attach/detach
+	Bound      *PartitionBoundSpec // FOR VALUES, if attaching
+	Concurrent bool
+}
+
+func (n *PartitionCmd) Tag() NodeTag { return T_PartitionCmd }
 
 // OnConflictClause represents ON CONFLICT clause.
 type OnConflictClause struct {
@@ -548,6 +638,15 @@ type ParamRef struct {
 }
 
 func (n *ParamRef) Tag() NodeTag { return T_ParamRef }
+
+// CurrentOfExpr represents WHERE CURRENT OF cursor_name.
+type CurrentOfExpr struct {
+	CvarNo     int    // RT index of target relation
+	CursorName string // name of referenced cursor
+	CursorParam int   // refcursor parameter number
+}
+
+func (n *CurrentOfExpr) Tag() NodeTag { return T_CurrentOfExpr }
 
 // SubLink represents a subquery appearing in an expression.
 type SubLink struct {
@@ -882,6 +981,13 @@ type CreateFunctionStmt struct {
 }
 
 func (n *CreateFunctionStmt) Tag() NodeTag { return T_CreateFunctionStmt }
+
+// ReturnStmt represents a RETURN statement in SQL-standard function bodies.
+type ReturnStmt struct {
+	Returnval Node // return value expression
+}
+
+func (n *ReturnStmt) Tag() NodeTag { return T_ReturnStmt }
 
 // FunctionParameter represents a parameter in CREATE FUNCTION.
 type FunctionParameter struct {
@@ -1945,3 +2051,412 @@ type ReassignOwnedStmt struct {
 }
 
 func (n *ReassignOwnedStmt) Tag() NodeTag { return T_ReassignOwnedStmt }
+
+// SQLValueFunction represents SQL-standard functions that don't require
+// a function call syntax, e.g. CURRENT_DATE, CURRENT_USER, etc.
+type SQLValueFunction struct {
+	Op       SVFOp    // which function this is
+	Typmod   int32    // typmod to apply, or -1
+	Location ParseLoc // token location, or -1
+}
+
+func (n *SQLValueFunction) Tag() NodeTag { return T_SQLValueFunction }
+
+// SetToDefault represents a DEFAULT marker in expressions.
+type SetToDefault struct {
+	TypeId   Oid      // type for substituted value
+	Typmod   int32    // typemod for substituted value
+	Collation Oid     // collation for the datatype
+	Location ParseLoc // token location, or -1
+}
+
+func (n *SetToDefault) Tag() NodeTag { return T_SetToDefault }
+
+// XmlExprOp represents the type of XML expression.
+type XmlExprOp int
+
+const (
+	IS_XMLCONCAT    XmlExprOp = iota // XMLCONCAT(args)
+	IS_XMLELEMENT                    // XMLELEMENT(name, xml_attributes, args)
+	IS_XMLFOREST                     // XMLFOREST(xml_attributes)
+	IS_XMLPARSE                      // XMLPARSE(text, is_doc, preserve_ws)
+	IS_XMLPI                         // XMLPI(name [, args])
+	IS_XMLROOT                       // XMLROOT(xml, version, standalone)
+	IS_XMLSERIALIZE                  // XMLSERIALIZE(is_document, xmlval, indent)
+	IS_DOCUMENT                      // xmlval IS DOCUMENT
+)
+
+// XmlOptionType for DOCUMENT or CONTENT
+type XmlOptionType int
+
+const (
+	XMLOPTION_DOCUMENT XmlOptionType = iota
+	XMLOPTION_CONTENT
+)
+
+// XML standalone constants
+const (
+	XML_STANDALONE_YES      = 0
+	XML_STANDALONE_NO       = 1
+	XML_STANDALONE_NO_VALUE = 2
+	XML_STANDALONE_OMITTED  = 3
+)
+
+// XmlExpr represents various SQL/XML functions requiring special grammar.
+type XmlExpr struct {
+	Op        XmlExprOp     // xml function ID
+	Name      string        // name in xml(NAME foo ...) syntaxes
+	NamedArgs *List         // non-XML expressions for xml_attributes
+	ArgNames  *List         // parallel list of String values
+	Args      *List         // list of expressions
+	Xmloption XmlOptionType // DOCUMENT or CONTENT
+	Indent    bool          // INDENT option for XMLSERIALIZE
+	Type      Oid           // target type for XMLSERIALIZE
+	Typmod    int32         // target typmod for XMLSERIALIZE
+	Location  ParseLoc      // token location, or -1
+}
+
+func (n *XmlExpr) Tag() NodeTag { return T_XmlExpr }
+
+// XmlSerialize represents XMLSERIALIZE(DOCUMENT|CONTENT expr AS typename).
+type XmlSerialize struct {
+	Xmloption XmlOptionType // DOCUMENT or CONTENT
+	Expr      Node          // the XML expression
+	TypeName  *TypeName     // target type name
+	Indent    bool          // INDENT option
+	Location  ParseLoc      // token location, or -1
+}
+
+func (n *XmlSerialize) Tag() NodeTag { return T_XmlSerialize }
+
+// RangeTableFunc represents raw form of table functions such as XMLTABLE.
+type RangeTableFunc struct {
+	Lateral    bool     // does it have LATERAL prefix?
+	Docexpr    Node     // document expression
+	Rowexpr    Node     // row generator expression
+	Namespaces *List    // list of namespaces as ResTarget
+	Columns    *List    // list of RangeTableFuncCol
+	Alias      *Alias   // table alias & optional column aliases
+	Location   ParseLoc // token location, or -1
+}
+
+func (n *RangeTableFunc) Tag() NodeTag { return T_RangeTableFunc }
+
+// RangeTableFuncCol represents one column in a RangeTableFunc.
+type RangeTableFuncCol struct {
+	Colname       string    // name of generated column
+	TypeName      *TypeName // type of generated column
+	ForOrdinality bool      // does it have FOR ORDINALITY?
+	IsNotNull     bool      // does it have NOT NULL?
+	Colexpr       Node      // column filter expression (PATH)
+	Coldefexpr    Node      // column default value expression
+	Location      ParseLoc  // token location, or -1
+}
+
+func (n *RangeTableFuncCol) Tag() NodeTag { return T_RangeTableFuncCol }
+
+// ===== SQL/JSON node types =====
+
+// JsonEncoding represents JSON encoding type.
+type JsonEncoding int
+
+const (
+	JS_ENC_DEFAULT JsonEncoding = iota
+	JS_ENC_UTF8
+	JS_ENC_UTF16
+	JS_ENC_UTF32
+)
+
+// JsonFormatType represents JSON format type.
+type JsonFormatType int
+
+const (
+	JS_FORMAT_DEFAULT JsonFormatType = iota
+	JS_FORMAT_JSON
+	JS_FORMAT_JSONB
+)
+
+// JsonFormat represents a JSON format clause.
+type JsonFormat struct {
+	FormatType JsonFormatType
+	Encoding   JsonEncoding
+	Location   ParseLoc
+}
+
+func (n *JsonFormat) Tag() NodeTag { return T_JsonFormat }
+
+// JsonReturning represents the RETURNING clause of a JSON function.
+type JsonReturning struct {
+	Format *JsonFormat
+	Typid  Oid
+	Typmod int32
+}
+
+func (n *JsonReturning) Tag() NodeTag { return T_JsonReturning }
+
+// JsonValueExpr represents a JSON value expression.
+type JsonValueExpr struct {
+	RawExpr       Node
+	FormattedExpr Node
+	Format        *JsonFormat
+}
+
+func (n *JsonValueExpr) Tag() NodeTag { return T_JsonValueExpr }
+
+// JsonOutput represents the output clause of JSON constructors.
+type JsonOutput struct {
+	TypeName  *TypeName
+	Returning *JsonReturning
+}
+
+func (n *JsonOutput) Tag() NodeTag { return T_JsonOutput }
+
+// JsonArgument represents an argument in PASSING clause.
+type JsonArgument struct {
+	Val  *JsonValueExpr
+	Name string
+}
+
+func (n *JsonArgument) Tag() NodeTag { return T_JsonArgument }
+
+// JsonQuotes represents KEEP/OMIT QUOTES option.
+type JsonQuotes int
+
+const (
+	JS_QUOTES_UNSPEC JsonQuotes = iota
+	JS_QUOTES_KEEP
+	JS_QUOTES_OMIT
+)
+
+// JsonWrapper represents wrapper behavior.
+type JsonWrapper int
+
+const (
+	JSW_UNSPEC JsonWrapper = iota
+	JSW_NONE
+	JSW_CONDITIONAL
+	JSW_UNCONDITIONAL
+)
+
+// JsonBehaviorType represents JSON behavior types.
+type JsonBehaviorType int
+
+const (
+	JSON_BEHAVIOR_NULL JsonBehaviorType = iota
+	JSON_BEHAVIOR_ERROR
+	JSON_BEHAVIOR_EMPTY
+	JSON_BEHAVIOR_TRUE
+	JSON_BEHAVIOR_FALSE
+	JSON_BEHAVIOR_UNKNOWN
+	JSON_BEHAVIOR_EMPTY_ARRAY
+	JSON_BEHAVIOR_EMPTY_OBJECT
+	JSON_BEHAVIOR_DEFAULT
+)
+
+// JsonBehavior represents ON ERROR / ON EMPTY behavior.
+type JsonBehavior struct {
+	Btype    JsonBehaviorType
+	Expr     Node
+	Coerce   Node
+	Location ParseLoc
+}
+
+func (n *JsonBehavior) Tag() NodeTag { return T_JsonBehavior }
+
+// JsonExprOp represents JSON function operation type.
+type JsonExprOp int
+
+const (
+	JSON_EXISTS_OP JsonExprOp = iota
+	JSON_QUERY_OP
+	JSON_VALUE_OP
+	JSON_TABLE_OP
+)
+
+// JsonFuncExpr represents JSON_VALUE, JSON_QUERY, JSON_EXISTS function calls.
+type JsonFuncExpr struct {
+	Op          JsonExprOp
+	ColumnName  string
+	ContextItem *JsonValueExpr
+	Pathspec    Node
+	Passing     *List
+	Output      *JsonOutput
+	OnEmpty     *JsonBehavior
+	OnError     *JsonBehavior
+	Wrapper     JsonWrapper
+	Quotes      JsonQuotes
+	Location    ParseLoc
+}
+
+func (n *JsonFuncExpr) Tag() NodeTag { return T_JsonFuncExpr }
+
+// JsonTablePathSpec represents a path specification in JSON_TABLE.
+type JsonTablePathSpec struct {
+	String       Node
+	Name         string
+	NameLocation ParseLoc
+	Location     ParseLoc
+}
+
+func (n *JsonTablePathSpec) Tag() NodeTag { return T_JsonTablePathSpec }
+
+// JsonTableColumnType represents the type of a JSON_TABLE column.
+type JsonTableColumnType int
+
+const (
+	JTC_FOR_ORDINALITY JsonTableColumnType = iota
+	JTC_REGULAR
+	JTC_EXISTS
+	JTC_FORMATTED
+	JTC_NESTED
+)
+
+// JsonTableColumn represents a column definition in JSON_TABLE.
+type JsonTableColumn struct {
+	Coltype  JsonTableColumnType
+	Name     string
+	TypeName *TypeName
+	Pathspec *JsonTablePathSpec
+	Format   *JsonFormat
+	Wrapper  JsonWrapper
+	Quotes   JsonQuotes
+	Columns  *List
+	OnEmpty  *JsonBehavior
+	OnError  *JsonBehavior
+	Location ParseLoc
+}
+
+func (n *JsonTableColumn) Tag() NodeTag { return T_JsonTableColumn }
+
+// JsonTable represents JSON_TABLE function.
+type JsonTable struct {
+	ContextItem *JsonValueExpr
+	Pathspec    *JsonTablePathSpec
+	Passing     *List
+	Columns     *List
+	OnError     *JsonBehavior
+	Alias       *Alias
+	Lateral     bool
+	Location    ParseLoc
+}
+
+func (n *JsonTable) Tag() NodeTag { return T_JsonTable }
+
+// JsonKeyValue represents a key-value pair in JSON_OBJECT.
+type JsonKeyValue struct {
+	Key   Node
+	Value *JsonValueExpr
+}
+
+func (n *JsonKeyValue) Tag() NodeTag { return T_JsonKeyValue }
+
+// JsonParseExpr represents JSON() parse expression.
+type JsonParseExpr struct {
+	Expr       *JsonValueExpr
+	Output     *JsonOutput
+	UniqueKeys bool
+	Location   ParseLoc
+}
+
+func (n *JsonParseExpr) Tag() NodeTag { return T_JsonParseExpr }
+
+// JsonScalarExpr represents JSON_SCALAR() expression.
+type JsonScalarExpr struct {
+	Expr     Node
+	Output   *JsonOutput
+	Location ParseLoc
+}
+
+func (n *JsonScalarExpr) Tag() NodeTag { return T_JsonScalarExpr }
+
+// JsonSerializeExpr represents JSON_SERIALIZE() expression.
+type JsonSerializeExpr struct {
+	Expr     *JsonValueExpr
+	Output   *JsonOutput
+	Location ParseLoc
+}
+
+func (n *JsonSerializeExpr) Tag() NodeTag { return T_JsonSerializeExpr }
+
+// JsonObjectConstructor represents JSON_OBJECT() constructor.
+type JsonObjectConstructor struct {
+	Exprs        *List // list of JsonKeyValue
+	Output       *JsonOutput
+	AbsentOnNull bool
+	UniqueKeys   bool
+	Location     ParseLoc
+}
+
+func (n *JsonObjectConstructor) Tag() NodeTag { return T_JsonObjectConstructor }
+
+// JsonArrayConstructor represents JSON_ARRAY() with value list.
+type JsonArrayConstructor struct {
+	Exprs        *List // list of JsonValueExpr
+	Output       *JsonOutput
+	AbsentOnNull bool
+	Location     ParseLoc
+}
+
+func (n *JsonArrayConstructor) Tag() NodeTag { return T_JsonArrayConstructor }
+
+// JsonArrayQueryConstructor represents JSON_ARRAY() with subquery.
+type JsonArrayQueryConstructor struct {
+	Query        Node
+	Output       *JsonOutput
+	Format       *JsonFormat
+	AbsentOnNull bool
+	Location     ParseLoc
+}
+
+func (n *JsonArrayQueryConstructor) Tag() NodeTag { return T_JsonArrayQueryConstructor }
+
+// JsonAggConstructor represents common aggregate constructor fields.
+type JsonAggConstructor struct {
+	Output   *JsonOutput
+	Agg_filter Node
+	Agg_order *List
+	Over     *WindowDef
+	Location ParseLoc
+}
+
+func (n *JsonAggConstructor) Tag() NodeTag { return T_JsonAggConstructor }
+
+// JsonObjectAgg represents JSON_OBJECTAGG() aggregate.
+type JsonObjectAgg struct {
+	Constructor  *JsonAggConstructor
+	Arg          *JsonKeyValue
+	AbsentOnNull bool
+	UniqueKeys   bool
+}
+
+func (n *JsonObjectAgg) Tag() NodeTag { return T_JsonObjectAgg }
+
+// JsonArrayAgg represents JSON_ARRAYAGG() aggregate.
+type JsonArrayAgg struct {
+	Constructor  *JsonAggConstructor
+	Arg          *JsonValueExpr
+	AbsentOnNull bool
+}
+
+func (n *JsonArrayAgg) Tag() NodeTag { return T_JsonArrayAgg }
+
+// JsonValueType for IS JSON predicate.
+type JsonValueType int
+
+const (
+	JS_TYPE_ANY    JsonValueType = iota
+	JS_TYPE_OBJECT
+	JS_TYPE_ARRAY
+	JS_TYPE_SCALAR
+)
+
+// JsonIsPredicate represents expr IS JSON predicate.
+type JsonIsPredicate struct {
+	Expr       Node
+	Format     *JsonFormat
+	ItemType   JsonValueType
+	UniqueKeys bool
+	Location   ParseLoc
+}
+
+func (n *JsonIsPredicate) Tag() NodeTag { return T_JsonIsPredicate }
