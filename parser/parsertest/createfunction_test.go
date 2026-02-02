@@ -405,6 +405,48 @@ func TestCreateFunctionAsTwoStrings(t *testing.T) {
 	}
 }
 
+// TestFuncTypePctType tests %TYPE syntax in function parameter and return types.
+// e.g., CREATE FUNCTION foo(hobbies_r.name%TYPE) RETURNS hobbies_r.person%TYPE ...
+func TestFuncTypePctType(t *testing.T) {
+	sqls := []string{
+		`CREATE FUNCTION foo(hobbies_r.name%TYPE) RETURNS hobbies_r.person%TYPE AS 'select 1' LANGUAGE SQL`,
+		`CREATE FUNCTION bar(x mytable.mycolumn%TYPE) RETURNS void AS 'select 1' LANGUAGE SQL`,
+	}
+	for _, sql := range sqls {
+		t.Run(sql[:40], func(t *testing.T) {
+			_, err := parser.Parse(sql)
+			if err != nil {
+				t.Errorf("Parse(%q) failed: %v", sql[:60], err)
+			}
+		})
+	}
+}
+
+// TestFuncTypePctTypeReturnPctType tests that the return type has PctType=true when using %TYPE.
+func TestFuncTypePctTypeReturnPctType(t *testing.T) {
+	stmt := parseCreateFunctionStmt(t, `CREATE FUNCTION foo(x mytable.mycolumn%TYPE) RETURNS mytable.mycolumn%TYPE AS 'select 1' LANGUAGE SQL`)
+
+	// Check return type has PctType set
+	if stmt.ReturnType == nil {
+		t.Fatal("expected ReturnType to be set")
+	}
+	if !stmt.ReturnType.PctType {
+		t.Error("expected ReturnType.PctType to be true")
+	}
+
+	// Check parameter type has PctType set
+	if stmt.Parameters == nil || len(stmt.Parameters.Items) != 1 {
+		t.Fatalf("expected 1 parameter, got %v", stmt.Parameters)
+	}
+	p1 := stmt.Parameters.Items[0].(*nodes.FunctionParameter)
+	if p1.ArgType == nil {
+		t.Fatal("expected param type to be set")
+	}
+	if !p1.ArgType.PctType {
+		t.Error("expected param ArgType.PctType to be true")
+	}
+}
+
 // TestCreateFunctionDefaultEqualsParam tests: CREATE FUNCTION foo(x integer = 0) RETURNS integer LANGUAGE sql AS 'SELECT x'
 func TestCreateFunctionDefaultEqualsParam(t *testing.T) {
 	stmt := parseCreateFunctionStmt(t, "CREATE FUNCTION foo(x integer = 0) RETURNS integer LANGUAGE sql AS 'SELECT x'")

@@ -59,6 +59,20 @@ func TestCreateStatisticsMultipleTypes(t *testing.T) {
 	}
 }
 
+func TestCreateStatisticsFuncExpr(t *testing.T) {
+	sqls := []string{
+		`CREATE STATISTICS s1 ON lower(a) FROM t1`,
+		`CREATE STATISTICS s2 (dependencies) ON lower(col1), col2 FROM t1`,
+		`CREATE STATISTICS s3 ON abs(a), b, c FROM t1`,
+	}
+	for _, sql := range sqls {
+		_, err := parser.Parse(sql)
+		if err != nil {
+			t.Errorf("Parse(%q) failed: %v", sql, err)
+		}
+	}
+}
+
 // =============================================================================
 // ALTER STATISTICS tests
 // =============================================================================

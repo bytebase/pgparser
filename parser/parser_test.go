@@ -577,3 +577,32 @@ func TestParseSelectWithMultipleGroupBy(t *testing.T) {
 		t.Errorf("expected second group by column 'b', got %q", str2.Str)
 	}
 }
+
+func TestOrderedSetAggrArgs(t *testing.T) {
+	sqls := []string{
+		// CREATE AGGREGATE with ordered-set args (ORDER BY only)
+		`CREATE AGGREGATE my_percentile(ORDER BY float8) (sfunc = ordered_set_transition, stype = internal, finalfunc = percentile_disc_final, finalfunc_extra)`,
+		// CREATE AGGREGATE with both direct and ordered args
+		`CREATE AGGREGATE my_percentile2(float8 ORDER BY float8) (sfunc = ordered_set_transition, stype = internal, finalfunc = percentile_disc_final, finalfunc_extra)`,
+		// DROP with ordered-set args
+		`DROP AGGREGATE my_percentile(ORDER BY float8)`,
+		// ALTER with ordered-set args
+		`ALTER AGGREGATE my_percentile(ORDER BY float8) RENAME TO new_name`,
+	}
+	for _, sql := range sqls {
+		label := sql
+		if len(label) > 40 {
+			label = label[:40]
+		}
+		t.Run(label, func(t *testing.T) {
+			_, err := Parse(sql)
+			if err != nil {
+				preview := sql
+				if len(preview) > 60 {
+					preview = preview[:60]
+				}
+				t.Errorf("Parse(%q) failed: %v", preview, err)
+			}
+		})
+	}
+}

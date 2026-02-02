@@ -32,7 +32,7 @@ type processedLine struct {
 }
 
 // psqlTerminatorRE matches psql metacommands that act as statement terminators.
-var psqlTerminatorRE = regexp.MustCompile(`(?i)\\(g|gx|gset)\b`)
+var psqlTerminatorRE = regexp.MustCompile(`(?i)\\(g|gx|gset|gdesc|gexec|crosstabview)\b`)
 
 // copyFromStdinRE detects COPY ... FROM STDIN statements.
 var copyFromStdinRE = regexp.MustCompile(`(?i)\bCOPY\b[^;]*\bFROM\b\s+STDIN\b`)
@@ -241,6 +241,28 @@ func splitStatements(filename string, lines []processedLine) []ExtractedStmt {
 	hasContent := false // true if buf has non-whitespace content
 	hasSQL := false     // true if buf has non-comment SQL content
 	inCopyData := false
+	parenDepth := 0     // tracks nesting depth of (...) in normal SQL
+	atomicDepth := 0    // tracks nesting depth of BEGIN ATOMIC ... END blocks
+	lastWord := ""      // previous completed word (uppercase)
+	currentWord := []byte{} // word currently being accumulated
+
+	// finishWord is called when a non-identifier character is seen in stNormal.
+	// It checks whether the last two words form "BEGIN ATOMIC" or the current
+	// word is "END" to manage atomicDepth.
+	finishWord := func() {
+		if len(currentWord) == 0 {
+			return
+		}
+		word := strings.ToUpper(string(currentWord))
+		currentWord = currentWord[:0]
+
+		if word == "ATOMIC" && lastWord == "BEGIN" {
+			atomicDepth++
+		} else if word == "END" && atomicDepth > 0 && parenDepth == 0 {
+			atomicDepth--
+		}
+		lastWord = word
+	}
 
 	emit := func() {
 		sql := strings.TrimSpace(buf.String())
@@ -259,6 +281,10 @@ func splitStatements(filename string, lines []processedLine) []ExtractedStmt {
 		hasContent = false
 		hasSQL = false
 		stmtStartLine = 0
+		parenDepth = 0
+		atomicDepth = 0
+		lastWord = ""
+		currentWord = currentWord[:0]
 	}
 
 	for _, pl := range lines {
@@ -302,10 +328,34 @@ func splitStatements(filename string, lines []processedLine) []ExtractedStmt {
 
 			switch state {
 			case stNormal:
+				// Track words for BEGIN ATOMIC / END detection
+				if isIdentCont(ch) {
+					currentWord = append(currentWord, ch)
+				} else {
+					finishWord()
+				}
+
 				switch {
 				case ch == ';':
-					// Statement terminator
-					emit()
+					// Only split on semicolons outside parens and outside BEGIN ATOMIC blocks
+					if parenDepth == 0 && atomicDepth == 0 {
+						// Statement terminator
+						emit()
+					} else {
+						buf.WriteByte(ch)
+					}
+
+				case ch == '(':
+					parenDepth++
+					hasSQL = true
+					buf.WriteByte(ch)
+
+				case ch == ')':
+					if parenDepth > 0 {
+						parenDepth--
+					}
+					hasSQL = true
+					buf.WriteByte(ch)
 
 				case ch == '-' && i+1 < n && text[i+1] == '-':
 					// Line comment: include rest of line in buffer

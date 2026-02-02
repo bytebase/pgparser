@@ -383,7 +383,7 @@ import (
 %type <node> xml_attribute_el xml_namespace_el
 %type <ival>  xml_whitespace_option xml_indent_option
 
-%type <node>  json_value_expr json_output_clause_opt json_format_clause_opt
+%type <node>  json_value_expr json_output_clause_opt json_format_clause json_format_clause_opt
 %type <node>  json_returning_clause_opt
 %type <node>  json_behavior json_behavior_clause_opt json_on_error_clause_opt
 %type <node>  json_table json_table_column_definition json_table_column_path_clause_opt
@@ -4561,6 +4561,23 @@ table_func_column:
 
 func_type:
 	Typename { $$ = $1 }
+	| type_function_name attrs '%' TYPE_P
+		{
+			names := prependList(&nodes.String{Str: $1}, $2)
+			tn := makeTypeNameFromNameList(names).(*nodes.TypeName)
+			tn.PctType = true
+			tn.Location = -1
+			$$ = tn
+		}
+	| SETOF type_function_name attrs '%' TYPE_P
+		{
+			names := prependList(&nodes.String{Str: $2}, $3)
+			tn := makeTypeNameFromNameList(names).(*nodes.TypeName)
+			tn.PctType = true
+			tn.Setof = true
+			tn.Location = -1
+			$$ = tn
+		}
 	;
 
 opt_createfunc_opt_list:
@@ -7414,12 +7431,23 @@ TableFuncElementList:
 aggr_args:
 	'(' '*' ')'
 		{
-			/* agg(*) - no args, indicated by nil arg list with marker */
-			$$ = makeList(&nodes.Integer{Ival: -1})
+			/* agg(*) - returns 2-element list: [nil, Integer{-1}] */
+			$$ = makeList2(nil, &nodes.Integer{Ival: -1})
 		}
 	| '(' aggr_args_list ')'
 		{
-			$$ = $2
+			/* normal args - returns 2-element list: [args, Integer{-1}] */
+			$$ = makeList2($2, &nodes.Integer{Ival: -1})
+		}
+	| '(' ORDER BY aggr_args_list ')'
+		{
+			/* ordered-set agg with no direct args - returns 2-element list: [args, Integer{0}] */
+			$$ = makeList2($4, &nodes.Integer{Ival: 0})
+		}
+	| '(' aggr_args_list ORDER BY aggr_args_list ')'
+		{
+			/* ordered-set agg with direct args and ordered args */
+			$$ = makeOrderedSetArgs($2, $5)
 		}
 	;
 
@@ -10407,10 +10435,26 @@ json_value_expr:
 		}
 	;
 
+json_format_clause:
+	FORMAT JSON
+		{
+			$$ = &nodes.JsonFormat{
+				FormatType: nodes.JS_FORMAT_JSON,
+				Location:   -1,
+			}
+		}
+	| FORMAT JSON ENCODING name
+		{
+			$$ = &nodes.JsonFormat{
+				FormatType: nodes.JS_FORMAT_JSON,
+				Location:   -1,
+			}
+		}
+	;
+
 json_format_clause_opt:
-	FORMAT JSON                         { $$ = nil }
-	| FORMAT JSON ENCODING name         { $$ = nil }
-	| /* EMPTY */                       { $$ = nil }
+	json_format_clause      { $$ = $1 }
+	| /* EMPTY */           { $$ = nil }
 	;
 
 json_returning_clause_opt:
@@ -10454,6 +10498,8 @@ json_behavior_type:
 	| UNKNOWN       { $$ = int64(nodes.JSON_BEHAVIOR_UNKNOWN) }
 	| EMPTY_P ARRAY { $$ = int64(nodes.JSON_BEHAVIOR_EMPTY_ARRAY) }
 	| EMPTY_P OBJECT_P { $$ = int64(nodes.JSON_BEHAVIOR_EMPTY_OBJECT) }
+	/* non-standard, for Oracle compatibility */
+	| EMPTY_P          { $$ = int64(nodes.JSON_BEHAVIOR_EMPTY_ARRAY) }
 	;
 
 json_behavior_clause_opt:
@@ -10678,6 +10724,24 @@ json_table_column_definition:
 				Pathspec: asJsonTablePathSpec($3),
 				Wrapper:  nodes.JsonWrapper($4),
 				Quotes:   nodes.JsonQuotes($5),
+				OnEmpty:  onEmpty,
+				OnError:  onError,
+				Location: -1,
+			}
+		}
+	| ColId Typename json_format_clause json_table_column_path_clause_opt
+		json_wrapper_behavior json_quotes_clause_opt
+		json_behavior_clause_opt
+		{
+			onEmpty, onError := splitJsonBehaviorClause($7)
+			$$ = &nodes.JsonTableColumn{
+				Coltype:  nodes.JTC_FORMATTED,
+				Name:     $1,
+				TypeName: $2,
+				Format:   $3.(*nodes.JsonFormat),
+				Pathspec: asJsonTablePathSpec($4),
+				Wrapper:  nodes.JsonWrapper($5),
+				Quotes:   nodes.JsonQuotes($6),
 				OnEmpty:  onEmpty,
 				OnError:  onError,
 				Location: -1,
@@ -13368,7 +13432,12 @@ operator_with_argtypes:
 	;
 
 oper_argtypes:
-	'(' Typename ',' Typename ')'
+	'(' Typename ')'
+		{
+			pglex.Error("missing argument, use NONE to denote the missing argument of a unary operator")
+			$$ = nil
+		}
+	| '(' Typename ',' Typename ')'
 		{
 			$$ = &nodes.List{Items: []nodes.Node{$2, $4}}
 		}
@@ -15759,6 +15828,12 @@ stats_param:
 				Name: $1,
 			}
 		}
+	| func_expr_windowless
+		{
+			$$ = &nodes.StatsElem{
+				Expr: $1,
+			}
+		}
 	| '(' a_expr ')'
 		{
 			$$ = &nodes.StatsElem{
@@ -17325,22 +17400,43 @@ func extractArgTypes(args *nodes.List) *nodes.List {
 	return result
 }
 
-// extractAggrArgTypes extracts the type names from aggregate argument list.
-// aggr_args wraps in a list where first element is a list of FunctionParameter or marker.
+// extractAggrArgTypes extracts the type names from an aggregate argument list.
+// aggr_args returns a 2-element list: [args_list, Integer_marker].
+// The first element is either nil (for agg(*)) or a *List of FunctionParameter nodes.
+// This function extracts the ArgType from each FunctionParameter in the first element.
 func extractAggrArgTypes(args *nodes.List) *nodes.List {
-	if args == nil {
+	if args == nil || len(args.Items) < 1 {
+		return nil
+	}
+	// First element is the args list (may be nil for agg(*))
+	argsList, ok := args.Items[0].(*nodes.List)
+	if !ok || argsList == nil {
 		return nil
 	}
 	result := &nodes.List{}
-	for _, item := range args.Items {
-		switch v := item.(type) {
-		case *nodes.FunctionParameter:
-			result.Items = append(result.Items, v.ArgType)
-		case *nodes.Integer:
-			// Marker for agg(*) - skip
+	for _, item := range argsList.Items {
+		if fp, ok := item.(*nodes.FunctionParameter); ok {
+			result.Items = append(result.Items, fp.ArgType)
 		}
 	}
 	return result
+}
+
+// makeOrderedSetArgs builds the aggr_args result for ordered-set aggregates
+// with both direct args and ORDER BY args.
+// Returns a 2-element list: [combined_args_list, Integer{ndirectargs}].
+// The combined list has the direct args followed by the ORDER BY args.
+func makeOrderedSetArgs(directArgs *nodes.List, orderedArgs *nodes.List) *nodes.List {
+	combined := &nodes.List{}
+	ndirect := 0
+	if directArgs != nil {
+		combined.Items = append(combined.Items, directArgs.Items...)
+		ndirect = len(directArgs.Items)
+	}
+	if orderedArgs != nil {
+		combined.Items = append(combined.Items, orderedArgs.Items...)
+	}
+	return makeList2(combined, &nodes.Integer{Ival: int64(ndirect)})
 }
 
 // checkFuncName validates that a qualified function name has at most 3 parts.
