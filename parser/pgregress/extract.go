@@ -11,9 +11,10 @@ import (
 
 // ExtractedStmt represents a single SQL statement extracted from a .sql file.
 type ExtractedStmt struct {
-	SQL       string // The complete SQL text (without trailing semicolon)
-	File      string // Source filename (basename)
-	StartLine int    // 1-based line number where this statement starts
+	SQL        string // The complete SQL text (without trailing semicolon)
+	File       string // Source filename (basename)
+	StartLine  int    // 1-based line number where this statement starts
+	HasPsqlVar bool   // True if the statement contains psql variable interpolation
 }
 
 // ExtractStatements splits a PostgreSQL regression test .sql file into
@@ -268,9 +269,10 @@ func splitStatements(filename string, lines []processedLine) []ExtractedStmt {
 		sql := strings.TrimSpace(buf.String())
 		if sql != "" && hasSQL {
 			result = append(result, ExtractedStmt{
-				SQL:       sql,
-				File:      filename,
-				StartLine: stmtStartLine,
+				SQL:        sql,
+				File:       filename,
+				StartLine:  stmtStartLine,
+				HasPsqlVar: ContainsPsqlVariable(sql),
 			})
 			// Check if this was COPY FROM STDIN
 			if copyFromStdinRE.MatchString(sql) {
@@ -549,4 +551,145 @@ func isIdentCont(c byte) bool {
 
 func isSpaceByte(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+// ContainsPsqlVariable detects psql variable interpolation patterns in SQL text.
+// These patterns (:varname, :'varname', :"varname") are expanded by the psql client
+// before being sent to the server, so they are not valid SQL and cannot be parsed
+// by a standard SQL parser.
+//
+// The function uses a best-effort approach: it scans through the SQL text tracking
+// string literal context (single-quoted, double-quoted, dollar-quoted) and comments
+// to avoid false positives from colons inside strings or comments. It correctly
+// skips :: (PostgreSQL type cast) and := (PL/pgSQL assignment).
+func ContainsPsqlVariable(sql string) bool {
+	// Quick exit: no colon means no psql variable possible.
+	if !strings.Contains(sql, ":") {
+		return false
+	}
+
+	n := len(sql)
+	i := 0
+
+	for i < n {
+		ch := sql[i]
+
+		switch {
+		// Single-quoted string: skip contents
+		case ch == '\'':
+			i++
+			for i < n {
+				if sql[i] == '\'' {
+					i++
+					// '' is an escaped quote, keep going
+					if i < n && sql[i] == '\'' {
+						i++
+						continue
+					}
+					break
+				}
+				if sql[i] == '\\' {
+					// Handle E-string backslash escapes (also handles
+					// standard_conforming_strings=off). Being conservative
+					// and skipping after backslash is safe either way.
+					i++
+					if i < n {
+						i++
+					}
+					continue
+				}
+				i++
+			}
+
+		// Double-quoted identifier: skip contents
+		case ch == '"':
+			i++
+			for i < n {
+				if sql[i] == '"' {
+					i++
+					if i < n && sql[i] == '"' {
+						i++ // escaped ""
+						continue
+					}
+					break
+				}
+				i++
+			}
+
+		// Dollar-quoted string: skip contents
+		case ch == '$':
+			tag := tryParseDollarTagStr(sql, i)
+			if tag != "" {
+				// Skip past opening tag
+				i += len(tag)
+				// Find closing tag
+				for i < n {
+					if sql[i] == '$' && i+len(tag) <= n && sql[i:i+len(tag)] == tag {
+						i += len(tag)
+						break
+					}
+					i++
+				}
+			} else {
+				i++
+			}
+
+		// Line comment: skip to end of line
+		case ch == '-' && i+1 < n && sql[i+1] == '-':
+			i += 2
+			for i < n && sql[i] != '\n' {
+				i++
+			}
+
+		// Block comment: skip contents (with nesting)
+		case ch == '/' && i+1 < n && sql[i+1] == '*':
+			i += 2
+			depth := 1
+			for i < n && depth > 0 {
+				if sql[i] == '/' && i+1 < n && sql[i+1] == '*' {
+					depth++
+					i += 2
+				} else if sql[i] == '*' && i+1 < n && sql[i+1] == '/' {
+					depth--
+					i += 2
+				} else {
+					i++
+				}
+			}
+
+		// Colon: check for psql variable vs type cast vs assignment
+		case ch == ':':
+			if i+1 < n {
+				next := sql[i+1]
+				// :: is a PostgreSQL type cast — skip both colons
+				if next == ':' {
+					i += 2
+					continue
+				}
+				// := is a PL/pgSQL assignment — skip
+				if next == '=' {
+					i += 2
+					continue
+				}
+				// :letter or :underscore is a psql variable
+				if isIdentStart(next) {
+					return true
+				}
+				// :'...' is a psql quoted variable
+				if next == '\'' {
+					return true
+				}
+				// :"..." is a psql double-quoted variable
+				if next == '"' {
+					return true
+				}
+			}
+			i++
+
+		default:
+			i++
+		}
+	}
+
+	return false
 }

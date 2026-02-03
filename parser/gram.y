@@ -374,7 +374,8 @@ import (
 %type <list>  opt_c_include ExclusionConstraintList
 %type <list>  ExclusionConstraintElem
 %type <str>   OptConsTableSpace ExistingIndex
-%type <node>  hash_partbound hash_partbound_elem
+%type <list>  hash_partbound
+%type <node>  hash_partbound_elem
 %type <node>  OptConstrFromTable
 %type <node>  xml_root_version opt_xml_root_standalone
 %type <node>  xmlexists_argument
@@ -466,7 +467,7 @@ import (
 %type <boolean>  opt_recheck
 %type <ival>  cast_context
 %type <boolean>  opt_if_exists
-%type <list>  transform_element_list
+%type <list>  transform_element_list transform_type_list func_as
 %type <boolean>  opt_no
 %type <node>  create_as_target create_mv_target
 %type <boolean> opt_with_data
@@ -1621,37 +1622,40 @@ PartitionBoundSpec:
 	/* a HASH partition */
 	| FOR VALUES WITH '(' hash_partbound ')'
 		{
-			$$ = $5.(*nodes.PartitionBoundSpec)
+			n := &nodes.PartitionBoundSpec{
+				Strategy:  'h',
+				Modulus:   -1,
+				Remainder: -1,
+				Location:  -1,
+			}
+			for _, item := range $5.Items {
+				opt := item.(*nodes.DefElem)
+				switch opt.Defname {
+				case "modulus":
+					n.Modulus = int(opt.Arg.(*nodes.Integer).Ival)
+				case "remainder":
+					n.Remainder = int(opt.Arg.(*nodes.Integer).Ival)
+				}
+			}
+			$$ = n
 		}
 	;
 
 hash_partbound:
-	hash_partbound_elem ',' hash_partbound_elem
+	hash_partbound_elem
 		{
-			n := $1.(*nodes.PartitionBoundSpec)
-			n2 := $3.(*nodes.PartitionBoundSpec)
-			if n.Modulus != 0 {
-				n.Remainder = n2.Remainder
-			} else {
-				n.Modulus = n2.Modulus
-			}
-			n.Strategy = 'h'
-			n.Location = -1
-			$$ = n
+			$$ = makeList($1)
+		}
+	| hash_partbound ',' hash_partbound_elem
+		{
+			$$ = appendList($1, $3)
 		}
 	;
 
 hash_partbound_elem:
 	NonReservedWord Iconst
 		{
-			n := &nodes.PartitionBoundSpec{}
-			switch $1 {
-			case "modulus":
-				n.Modulus = int($2)
-			case "remainder":
-				n.Remainder = int($2)
-			}
-			$$ = n
+			$$ = makeDefElem($1, &nodes.Integer{Ival: $2})
 		}
 	;
 
@@ -4645,11 +4649,25 @@ ReturnStmt:
 	;
 
 createfunc_opt_item:
-	LANGUAGE NonReservedWord_or_Sconst
+	AS func_as
+		{
+			$$ = &nodes.DefElem{
+				Defname: "as",
+				Arg:     $2,
+			}
+		}
+	| LANGUAGE NonReservedWord_or_Sconst
 		{
 			$$ = &nodes.DefElem{
 				Defname: "language",
 				Arg:     &nodes.String{Str: $2},
+			}
+		}
+	| TRANSFORM transform_type_list
+		{
+			$$ = &nodes.DefElem{
+				Defname: "transform",
+				Arg:     $2,
 			}
 		}
 	| WINDOW
@@ -4660,6 +4678,20 @@ createfunc_opt_item:
 			}
 		}
 	| common_func_opt_item { $$ = $1 }
+	;
+
+func_as:
+	Sconst
+		{ $$ = makeList(&nodes.String{Str: $1}) }
+	| Sconst ',' Sconst
+		{ $$ = makeList2(&nodes.String{Str: $1}, &nodes.String{Str: $3}) }
+	;
+
+transform_type_list:
+	FOR TYPE_P Typename
+		{ $$ = makeList($3) }
+	| transform_type_list ',' FOR TYPE_P Typename
+		{ $$ = appendList($1, $5) }
 	;
 
 common_func_opt_item:
@@ -4717,20 +4749,6 @@ common_func_opt_item:
 			$$ = &nodes.DefElem{
 				Defname: "security",
 				Arg:     &nodes.Integer{Ival: 0},
-			}
-		}
-	| AS Sconst
-		{
-			$$ = &nodes.DefElem{
-				Defname: "as",
-				Arg:     &nodes.String{Str: $2},
-			}
-		}
-	| AS Sconst ',' Sconst
-		{
-			$$ = &nodes.DefElem{
-				Defname: "as",
-				Arg:     &nodes.List{Items: []nodes.Node{&nodes.String{Str: $2}, &nodes.String{Str: $4}}},
 			}
 		}
 	| LEAKPROOF
@@ -6884,6 +6902,14 @@ SeqOptElem:
 	| RESTART opt_with NumericOnly
 		{
 			$$ = makeDefElem("restart", $3)
+		}
+	| LOGGED
+		{
+			$$ = makeDefElem("logged", &nodes.Boolean{Boolval: true})
+		}
+	| UNLOGGED
+		{
+			$$ = makeDefElem("logged", &nodes.Boolean{Boolval: false})
 		}
 	;
 
@@ -12901,7 +12927,51 @@ SecLabelStmt:
 				Label:    $8,
 			}
 		}
-	/* TODO: Add SECURITY LABEL ON FUNCTION/AGGREGATE variants in Phase 16 */
+	| SECURITY LABEL opt_provider ON AGGREGATE aggregate_with_argtypes IS security_label
+		{
+			$$ = &nodes.SecLabelStmt{
+				Objtype:  nodes.OBJECT_AGGREGATE,
+				Object:   $6,
+				Provider: $3,
+				Label:    $8,
+			}
+		}
+	| SECURITY LABEL opt_provider ON FUNCTION function_with_argtypes IS security_label
+		{
+			$$ = &nodes.SecLabelStmt{
+				Objtype:  nodes.OBJECT_FUNCTION,
+				Object:   $6,
+				Provider: $3,
+				Label:    $8,
+			}
+		}
+	| SECURITY LABEL opt_provider ON LARGE_P OBJECT_P NumericOnly IS security_label
+		{
+			$$ = &nodes.SecLabelStmt{
+				Objtype:  nodes.OBJECT_LARGEOBJECT,
+				Object:   $7,
+				Provider: $3,
+				Label:    $9,
+			}
+		}
+	| SECURITY LABEL opt_provider ON PROCEDURE function_with_argtypes IS security_label
+		{
+			$$ = &nodes.SecLabelStmt{
+				Objtype:  nodes.OBJECT_PROCEDURE,
+				Object:   $6,
+				Provider: $3,
+				Label:    $8,
+			}
+		}
+	| SECURITY LABEL opt_provider ON ROUTINE function_with_argtypes IS security_label
+		{
+			$$ = &nodes.SecLabelStmt{
+				Objtype:  nodes.OBJECT_ROUTINE,
+				Object:   $6,
+				Provider: $3,
+				Label:    $8,
+			}
+		}
 	;
 
 /*****************************************************************************

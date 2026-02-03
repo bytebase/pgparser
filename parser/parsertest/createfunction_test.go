@@ -73,9 +73,16 @@ func TestCreateFunctionBasic(t *testing.T) {
 	if asDef == nil {
 		t.Fatal("expected as option")
 	}
-	asStr, ok := asDef.Arg.(*nodes.String)
+	asList, ok := asDef.Arg.(*nodes.List)
 	if !ok {
-		t.Fatalf("expected as arg to be *nodes.String, got %T", asDef.Arg)
+		t.Fatalf("expected as arg to be *nodes.List, got %T", asDef.Arg)
+	}
+	if len(asList.Items) != 1 {
+		t.Fatalf("expected 1 item in AS list, got %d", len(asList.Items))
+	}
+	asStr, ok := asList.Items[0].(*nodes.String)
+	if !ok {
+		t.Fatalf("expected AS list item to be *nodes.String, got %T", asList.Items[0])
 	}
 	if asStr.Str != "SELECT 1" {
 		t.Errorf("expected as 'SELECT 1', got %q", asStr.Str)

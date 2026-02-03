@@ -33,6 +33,13 @@ DROP AGGREGATE my_percentile2(float8 ORDER BY float8);
 CREATE FUNCTION foo(x hobbies_r.name%TYPE) RETURNS hobbies_r.person%TYPE AS 'select 1' LANGUAGE SQL;
 CREATE FUNCTION bar(SETOF mytable.col%TYPE) RETURNS void AS 'select 1' LANGUAGE SQL;
 
+-- Task 1: TRANSFORM in CREATE FUNCTION
+CREATE FUNCTION my_func(jsonb) RETURNS int LANGUAGE sql TRANSFORM FOR TYPE jsonb AS $$ SELECT 1; $$;
+
 -- oper_argtypes single-arg error should report missing argument
 -- expect-error: missing argument
 DROP OPERATOR +(integer);
+
+-- Task 2: LOGGED/UNLOGGED sequences
+CREATE SEQUENCE s_logged AS integer LOGGED;
+CREATE SEQUENCE s_unlogged AS integer UNLOGGED;

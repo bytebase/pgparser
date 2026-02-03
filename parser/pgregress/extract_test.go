@@ -315,6 +315,181 @@ func containsDollarQuoteStart(s string) bool {
 	return false
 }
 
+// TestContainsPsqlVariable tests detection of psql variable interpolation.
+func TestContainsPsqlVariable(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+		want bool
+	}{
+		// Negative cases: no psql variables
+		{"plain SELECT", "SELECT 1", false},
+		{"type cast", "SELECT 1::int", false},
+		{"double type cast", "SELECT '2024-01-01'::date::text", false},
+		{"plpgsql assignment", "SELECT x := 5", false},
+		{"JSON string", `SELECT '{"key": "value"}'`, false},
+		{"no colon", "SELECT * FROM t WHERE id = 1", false},
+		{"colon in single-quoted string", "SELECT 'a:b'", false},
+		{"colon in dollar-quoted string", "SELECT $$ :varname $$", false},
+		{"colon in double-quoted identifier", `SELECT ":col" FROM t`, false},
+		{"colon in line comment", "SELECT 1 -- :varname", false},
+		{"colon in block comment", "SELECT /* :varname */ 1", false},
+		{"colon before digit", "SELECT $1::int", false},
+
+		// Positive cases: psql variables
+		{"simple variable", "SELECT :varname", true},
+		{"quoted variable", "SELECT :'filename'", true},
+		{"double-quoted variable", `SELECT :"tablename"`, true},
+		{"variable in VALUES", "INSERT INTO t VALUES (:x, :y)", true},
+		{"variable after cast", "SELECT 1::int + :offset", true},
+		{"underscore variable", "SELECT :_myvar", true},
+		{"variable at start", ":varname", true},
+		{"mixed variable", "SELECT :var FROM t WHERE x = 1::int", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ContainsPsqlVariable(tt.sql)
+			if got != tt.want {
+				t.Errorf("ContainsPsqlVariable(%q) = %v, want %v", tt.sql, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBackslashCommandHandling(t *testing.T) {
+	content := []byte("\\set varname value\nSELECT 1;\n\\getenv envvar PG_LIBDIR\nSELECT 2;\n\\lo_import 'file.txt'\nSELECT 3;\n")
+	stmts := ExtractStatements("test.sql", content)
+	var sqlStmts []string
+	for _, s := range stmts {
+		if s.SQL != "" {
+			sqlStmts = append(sqlStmts, s.SQL)
+		}
+	}
+	if len(sqlStmts) != 3 {
+		t.Fatalf("expected 3 statements, got %d: %v", len(sqlStmts), sqlStmts)
+	}
+}
+
+func TestBackslashCommandEdgeCases(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		wantSQL  []string
+	}{
+		{
+			name:    "gset terminates statement",
+			input:   "SELECT 1 AS x \\gset\nSELECT 2;\n",
+			wantSQL: []string{"SELECT 1 AS x", "SELECT 2"},
+		},
+		{
+			name:    "gset on own line terminates statement",
+			input:   "SELECT 1 AS x\n\\gset\nSELECT 2;\n",
+			wantSQL: []string{"SELECT 1 AS x", "SELECT 2"},
+		},
+		{
+			name:    "gdesc terminates statement",
+			input:   "SELECT 1 \\gdesc\nSELECT 2;\n",
+			wantSQL: []string{"SELECT 1", "SELECT 2"},
+		},
+		{
+			name:    "gexec terminates statement",
+			input:   "SELECT 'SELECT 1' \\gexec\nSELECT 2;\n",
+			wantSQL: []string{"SELECT 'SELECT 1'", "SELECT 2"},
+		},
+		{
+			name:    "gx terminates statement",
+			input:   "SELECT 1 \\gx\nSELECT 2;\n",
+			wantSQL: []string{"SELECT 1", "SELECT 2"},
+		},
+		{
+			name:    "crosstabview terminates statement",
+			input:   "SELECT 1, 2 \\crosstabview\nSELECT 3;\n",
+			wantSQL: []string{"SELECT 1, 2", "SELECT 3"},
+		},
+		{
+			name:    "copy metacommand skipped",
+			input:   "\\copy t FROM 'file.csv'\nSELECT 1;\n",
+			wantSQL: []string{"SELECT 1"},
+		},
+		{
+			name:    "echo metacommand skipped",
+			input:   "\\echo 'hello world'\nSELECT 1;\n",
+			wantSQL: []string{"SELECT 1"},
+		},
+		{
+			name:    "dt metacommand skipped",
+			input:   "\\dt\nSELECT 1;\n",
+			wantSQL: []string{"SELECT 1"},
+		},
+		{
+			name:    "d metacommand skipped",
+			input:   "\\d mytable\nSELECT 1;\n",
+			wantSQL: []string{"SELECT 1"},
+		},
+		{
+			name:    "pset metacommand skipped",
+			input:   "\\pset format unaligned\nSELECT 1;\n",
+			wantSQL: []string{"SELECT 1"},
+		},
+		{
+			name:    "if metacommand skipped",
+			input:   "\\if false\n\\endif\nSELECT 1;\n",
+			wantSQL: []string{"SELECT 1"},
+		},
+		{
+			name:    "multiple consecutive backslash commands",
+			input:   "\\set a 1\n\\set b 2\n\\set c 3\nSELECT 1;\n",
+			wantSQL: []string{"SELECT 1"},
+		},
+		{
+			name:    "backslash command with leading whitespace",
+			input:   "  \\set varname value\nSELECT 1;\n",
+			wantSQL: []string{"SELECT 1"},
+		},
+		{
+			name:    "backslash command with tab indent",
+			input:   "\t\\set varname value\nSELECT 1;\n",
+			wantSQL: []string{"SELECT 1"},
+		},
+		{
+			name:    "backslash in string literal not treated as metacommand",
+			input:   "SELECT E'\\n';\n",
+			wantSQL: []string{"SELECT E'\\n'"},
+		},
+		{
+			name:    "g terminates statement",
+			input:   "SELECT 1 \\g\nSELECT 2;\n",
+			wantSQL: []string{"SELECT 1", "SELECT 2"},
+		},
+		{
+			name:    "only backslash commands produce no statements",
+			input:   "\\set a 1\n\\set b 2\n",
+			wantSQL: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stmts := ExtractStatements("test.sql", []byte(tt.input))
+			var gotSQL []string
+			for _, s := range stmts {
+				if s.SQL != "" {
+					gotSQL = append(gotSQL, s.SQL)
+				}
+			}
+			if len(gotSQL) != len(tt.wantSQL) {
+				t.Fatalf("expected %d statements, got %d: %v", len(tt.wantSQL), len(gotSQL), gotSQL)
+			}
+			for i, want := range tt.wantSQL {
+				if gotSQL[i] != want {
+					t.Errorf("stmt[%d] = %q, want %q", i, gotSQL[i], want)
+				}
+			}
+		})
+	}
+}
+
 func containsDollarQuoteEnd(s string) bool {
 	// Simple check: count dollar tags - they should be even
 	count := 0

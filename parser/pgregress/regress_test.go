@@ -61,7 +61,7 @@ func TestPGRegress(t *testing.T) {
 	}
 
 	// Aggregate statistics
-	var totalStmts, totalPassed, totalKnown, totalNew, totalFixed int
+	var totalStmts, totalPassed, totalKnown, totalNew, totalFixed, totalPsqlVar int
 
 	sort.Strings(files)
 
@@ -78,7 +78,7 @@ func TestPGRegress(t *testing.T) {
 			stmts := ExtractStatements(base, content)
 			kf := knownFailures[base]
 
-			var passed, known, newFail, fixed int
+			var passed, known, newFail, fixed, psqlVar int
 			var failIndices []int
 
 			for i, stmt := range stmts {
@@ -87,13 +87,20 @@ func TestPGRegress(t *testing.T) {
 
 				if parseErr != nil {
 					failIndices = append(failIndices, i)
+					if stmt.HasPsqlVar {
+						psqlVar++
+					}
 					if isKnown {
 						known++
 					} else {
 						newFail++
 						if !*update {
-							t.Errorf("NEW FAILURE stmt[%d] line %d: %v\n  SQL: %.200s",
-								i, stmt.StartLine, parseErr, stmt.SQL)
+							label := "NEW FAILURE"
+							if stmt.HasPsqlVar {
+								label = "NEW FAILURE (psql variable)"
+							}
+							t.Errorf("%s stmt[%d] line %d: %v\n  SQL: %.200s",
+								label, i, stmt.StartLine, parseErr, stmt.SQL)
 						}
 					}
 				} else {
@@ -117,9 +124,10 @@ func TestPGRegress(t *testing.T) {
 			totalKnown += known
 			totalNew += newFail
 			totalFixed += fixed
+			totalPsqlVar += psqlVar
 
-			t.Logf("%s: %d stmts, %d passed, %d failed (%d known, %d new, %d fixed)",
-				base, len(stmts), passed, len(failIndices), known, newFail, fixed)
+			t.Logf("%s: %d stmts, %d passed, %d failed (%d known, %d new, %d fixed, %d psql-var)",
+				base, len(stmts), passed, len(failIndices), known, newFail, fixed, psqlVar)
 		})
 	}
 
@@ -130,12 +138,15 @@ func TestPGRegress(t *testing.T) {
 		passRate = 100 * float64(totalPassed) / float64(totalStmts)
 	}
 	t.Logf("\n=== PG REGRESS SUMMARY ===")
-	t.Logf("Files:  %d", len(files))
-	t.Logf("Stmts:  %d", totalStmts)
-	t.Logf("Passed: %d (%.1f%%)", totalPassed, passRate)
-	t.Logf("Failed: %d (known: %d, new: %d)", totalFailed, totalKnown, totalNew)
+	t.Logf("Files:    %d", len(files))
+	t.Logf("Stmts:    %d", totalStmts)
+	t.Logf("Passed:   %d (%.1f%%)", totalPassed, passRate)
+	t.Logf("Failed:   %d (known: %d, new: %d)", totalFailed, totalKnown, totalNew)
+	if totalPsqlVar > 0 {
+		t.Logf("Psql-var: %d (psql variable interpolation, not real grammar failures)", totalPsqlVar)
+	}
 	if totalFixed > 0 {
-		t.Logf("Fixed:  %d (remove from known_failures)", totalFixed)
+		t.Logf("Fixed:    %d (remove from known_failures)", totalFixed)
 	}
 
 	// Write updated known_failures.json
@@ -165,12 +176,13 @@ func TestPGRegressStats(t *testing.T) {
 	sort.Strings(files)
 
 	type fileStat struct {
-		name   string
-		total  int
-		passed int
+		name    string
+		total   int
+		passed  int
+		psqlVar int // failures due to psql variable interpolation
 	}
 	var stats []fileStat
-	var totalStmts, totalPassed int
+	var totalStmts, totalPassed, totalPsqlVar int
 
 	for _, file := range files {
 		base := filepath.Base(file)
@@ -181,15 +193,19 @@ func TestPGRegressStats(t *testing.T) {
 
 		stmts := ExtractStatements(base, content)
 		passed := 0
+		psqlVar := 0
 		for _, stmt := range stmts {
 			if _, err := parser.Parse(stmt.SQL); err == nil {
 				passed++
+			} else if stmt.HasPsqlVar {
+				psqlVar++
 			}
 		}
 
-		stats = append(stats, fileStat{name: base, total: len(stmts), passed: passed})
+		stats = append(stats, fileStat{name: base, total: len(stmts), passed: passed, psqlVar: psqlVar})
 		totalStmts += len(stmts)
 		totalPassed += passed
+		totalPsqlVar += psqlVar
 	}
 
 	// Print per-file results
@@ -200,7 +216,12 @@ func TestPGRegressStats(t *testing.T) {
 		}
 		status := "OK"
 		if s.passed < s.total {
-			status = fmt.Sprintf("PARTIAL (%d failures)", s.total-s.passed)
+			failures := s.total - s.passed
+			if s.psqlVar > 0 {
+				status = fmt.Sprintf("PARTIAL (%d failures, %d psql-var)", failures, s.psqlVar)
+			} else {
+				status = fmt.Sprintf("PARTIAL (%d failures)", failures)
+			}
 		}
 		t.Logf("%-40s %4d/%4d (%5.1f%%) %s", s.name, s.passed, s.total, rate, status)
 	}
@@ -211,4 +232,7 @@ func TestPGRegressStats(t *testing.T) {
 	}
 	t.Logf("\n=== TOTAL: %d/%d statements passed (%.1f%%) across %d files ===",
 		totalPassed, totalStmts, passRate, len(files))
+	if totalPsqlVar > 0 {
+		t.Logf("  Psql-var failures: %d (not real grammar failures)", totalPsqlVar)
+	}
 }

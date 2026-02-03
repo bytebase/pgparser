@@ -23,9 +23,7 @@
     0
   ],
   "arrays.sql": [
-    2,
-    211,
-    212
+    2
   ],
   "btree_index.sql": [
     4,
@@ -86,8 +84,7 @@
     3
   ],
   "create_function_sql.sql": [
-    67,
-    121
+    67
   ],
   "create_index.sql": [
     2,
@@ -99,10 +96,6 @@
   "create_operator.sql": [
     10,
     13
-  ],
-  "create_procedure.sql": [
-    11,
-    16
   ],
   "create_table.sql": [
     134
@@ -247,12 +240,6 @@
   "numerology.sql": [
     58
   ],
-  "privileges.sql": [
-    163,
-    164,
-    165,
-    786
-  ],
   "psql.sql": [
     31,
     39,
@@ -290,9 +277,7 @@
     109
   ],
   "rules.sql": [
-    68,
-    571,
-    573
+    68
   ],
   "sqljson.sql": [
     0,
@@ -498,10 +483,8 @@
     212
   ],
   "window.sql": [
-    122,
-    127,
-    254,
-    258
+    252,
+    256
   ],
   "with.sql": [
     298,
