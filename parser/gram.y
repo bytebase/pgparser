@@ -117,6 +117,7 @@ import (
 %start stmtblock
 
 %type <list>  stmtblock
+%type <list>  NumericOnly_list
 %type <node>  stmt SelectStmt simple_select select_clause
 %type <node>  select_with_parens select_no_parens
 %type <node>  a_expr b_expr c_expr columnref AexprConst func_expr func_application func_expr_common_subexpr
@@ -133,7 +134,7 @@ import (
 %type <node>  group_by_item having_clause
 %type <node>  empty_grouping_set cube_clause rollup_clause grouping_sets_clause
 %type <list>  sort_clause opt_sort_clause sortby_list
-%type <list>  expr_list opt_indirection indirection func_arg_list
+%type <list>  expr_list opt_indirection indirection func_arg_list func_arg_list_opt
 %type <list>  extract_list overlay_list position_list substr_list trim_list
 %type <str>   extract_arg unicode_normal_form
 %type <node>  sortby indirection_el func_arg_expr
@@ -281,7 +282,7 @@ import (
 %type <boolean> opt_restart_seqs opt_nowait opt_verbose opt_analyze opt_full opt_freeze
 %type <list>  relation_expr_list opt_vacuum_relation_list vacuum_relation_list
 %type <node>  vacuum_relation
-%type <ival>  opt_lock lock_type reindex_target_type reindex_target_multitable
+%type <ival>  opt_lock lock_type reindex_target_type reindex_target_multitable OptNoLog
 %type <str>   cluster_index_specification column_compression comment_text security_label opt_provider
 %type <ival>  object_type_name object_type_name_on_any_name
 %type <list>  opt_reindex_option_list
@@ -5236,6 +5237,17 @@ NumericOnly:
 		}
 	;
 
+NumericOnly_list:
+	NumericOnly
+		{
+			$$ = makeList($1)
+		}
+	| NumericOnly_list ',' NumericOnly
+		{
+			$$ = appendList($1, $3)
+		}
+	;
+
 SignedIconst:
 	Iconst      { $$ = $1 }
 	| '+' Iconst { $$ = $2 }
@@ -5261,7 +5273,7 @@ NonReservedWord:
  *****************************************************************************/
 
 GrantStmt:
-	GRANT privileges ON TABLE any_name_list TO grantee_list opt_grant_grant_option
+	GRANT privileges ON TABLE any_name_list TO grantee_list opt_grant_grant_option opt_granted_by
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     true,
@@ -5271,9 +5283,10 @@ GrantStmt:
 				Privileges:  $2,
 				Grantees:    $7,
 				GrantOption: $8,
+				Grantor:     roleSpecOrNil($9),
 			}
 		}
-	| GRANT privileges ON any_name_list TO grantee_list opt_grant_grant_option
+	| GRANT privileges ON any_name_list TO grantee_list opt_grant_grant_option opt_granted_by
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     true,
@@ -5283,9 +5296,10 @@ GrantStmt:
 				Privileges:  $2,
 				Grantees:    $6,
 				GrantOption: $7,
+				Grantor:     roleSpecOrNil($8),
 			}
 		}
-	| GRANT privileges ON SEQUENCE any_name_list TO grantee_list opt_grant_grant_option
+	| GRANT privileges ON SEQUENCE any_name_list TO grantee_list opt_grant_grant_option opt_granted_by
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     true,
@@ -5295,9 +5309,10 @@ GrantStmt:
 				Privileges:  $2,
 				Grantees:    $7,
 				GrantOption: $8,
+				Grantor:     roleSpecOrNil($9),
 			}
 		}
-	| GRANT privileges ON FUNCTION function_with_argtypes_list TO grantee_list opt_grant_grant_option
+	| GRANT privileges ON FUNCTION function_with_argtypes_list TO grantee_list opt_grant_grant_option opt_granted_by
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     true,
@@ -5307,9 +5322,10 @@ GrantStmt:
 				Privileges:  $2,
 				Grantees:    $7,
 				GrantOption: $8,
+				Grantor:     roleSpecOrNil($9),
 			}
 		}
-	| GRANT privileges ON PROCEDURE function_with_argtypes_list TO grantee_list opt_grant_grant_option
+	| GRANT privileges ON PROCEDURE function_with_argtypes_list TO grantee_list opt_grant_grant_option opt_granted_by
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     true,
@@ -5319,9 +5335,10 @@ GrantStmt:
 				Privileges:  $2,
 				Grantees:    $7,
 				GrantOption: $8,
+				Grantor:     roleSpecOrNil($9),
 			}
 		}
-	| GRANT privileges ON ROUTINE function_with_argtypes_list TO grantee_list opt_grant_grant_option
+	| GRANT privileges ON ROUTINE function_with_argtypes_list TO grantee_list opt_grant_grant_option opt_granted_by
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     true,
@@ -5331,9 +5348,10 @@ GrantStmt:
 				Privileges:  $2,
 				Grantees:    $7,
 				GrantOption: $8,
+				Grantor:     roleSpecOrNil($9),
 			}
 		}
-	| GRANT privileges ON DATABASE name_list TO grantee_list opt_grant_grant_option
+	| GRANT privileges ON DATABASE name_list TO grantee_list opt_grant_grant_option opt_granted_by
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     true,
@@ -5343,9 +5361,10 @@ GrantStmt:
 				Privileges:  $2,
 				Grantees:    $7,
 				GrantOption: $8,
+				Grantor:     roleSpecOrNil($9),
 			}
 		}
-	| GRANT privileges ON DOMAIN_P any_name_list TO grantee_list opt_grant_grant_option
+	| GRANT privileges ON DOMAIN_P any_name_list TO grantee_list opt_grant_grant_option opt_granted_by
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     true,
@@ -5355,9 +5374,10 @@ GrantStmt:
 				Privileges:  $2,
 				Grantees:    $7,
 				GrantOption: $8,
+				Grantor:     roleSpecOrNil($9),
 			}
 		}
-	| GRANT privileges ON LANGUAGE name_list TO grantee_list opt_grant_grant_option
+	| GRANT privileges ON LANGUAGE name_list TO grantee_list opt_grant_grant_option opt_granted_by
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     true,
@@ -5367,9 +5387,10 @@ GrantStmt:
 				Privileges:  $2,
 				Grantees:    $7,
 				GrantOption: $8,
+				Grantor:     roleSpecOrNil($9),
 			}
 		}
-	| GRANT privileges ON SCHEMA name_list TO grantee_list opt_grant_grant_option
+	| GRANT privileges ON SCHEMA name_list TO grantee_list opt_grant_grant_option opt_granted_by
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     true,
@@ -5379,9 +5400,10 @@ GrantStmt:
 				Privileges:  $2,
 				Grantees:    $7,
 				GrantOption: $8,
+				Grantor:     roleSpecOrNil($9),
 			}
 		}
-	| GRANT privileges ON TABLESPACE name_list TO grantee_list opt_grant_grant_option
+	| GRANT privileges ON TABLESPACE name_list TO grantee_list opt_grant_grant_option opt_granted_by
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     true,
@@ -5391,9 +5413,10 @@ GrantStmt:
 				Privileges:  $2,
 				Grantees:    $7,
 				GrantOption: $8,
+				Grantor:     roleSpecOrNil($9),
 			}
 		}
-	| GRANT privileges ON TYPE_P any_name_list TO grantee_list opt_grant_grant_option
+	| GRANT privileges ON TYPE_P any_name_list TO grantee_list opt_grant_grant_option opt_granted_by
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     true,
@@ -5403,9 +5426,10 @@ GrantStmt:
 				Privileges:  $2,
 				Grantees:    $7,
 				GrantOption: $8,
+				Grantor:     roleSpecOrNil($9),
 			}
 		}
-	| GRANT privileges ON FOREIGN DATA_P WRAPPER name_list TO grantee_list opt_grant_grant_option
+	| GRANT privileges ON FOREIGN DATA_P WRAPPER name_list TO grantee_list opt_grant_grant_option opt_granted_by
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     true,
@@ -5415,9 +5439,10 @@ GrantStmt:
 				Privileges:  $2,
 				Grantees:    $9,
 				GrantOption: $10,
+				Grantor:     roleSpecOrNil($11),
 			}
 		}
-	| GRANT privileges ON FOREIGN SERVER name_list TO grantee_list opt_grant_grant_option
+	| GRANT privileges ON FOREIGN SERVER name_list TO grantee_list opt_grant_grant_option opt_granted_by
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     true,
@@ -5427,9 +5452,10 @@ GrantStmt:
 				Privileges:  $2,
 				Grantees:    $8,
 				GrantOption: $9,
+				Grantor:     roleSpecOrNil($10),
 			}
 		}
-	| GRANT privileges ON ALL TABLES IN_P SCHEMA name_list TO grantee_list opt_grant_grant_option
+	| GRANT privileges ON ALL TABLES IN_P SCHEMA name_list TO grantee_list opt_grant_grant_option opt_granted_by
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     true,
@@ -5439,9 +5465,10 @@ GrantStmt:
 				Privileges:  $2,
 				Grantees:    $10,
 				GrantOption: $11,
+				Grantor:     roleSpecOrNil($12),
 			}
 		}
-	| GRANT privileges ON ALL SEQUENCES IN_P SCHEMA name_list TO grantee_list opt_grant_grant_option
+	| GRANT privileges ON ALL SEQUENCES IN_P SCHEMA name_list TO grantee_list opt_grant_grant_option opt_granted_by
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     true,
@@ -5451,9 +5478,10 @@ GrantStmt:
 				Privileges:  $2,
 				Grantees:    $10,
 				GrantOption: $11,
+				Grantor:     roleSpecOrNil($12),
 			}
 		}
-	| GRANT privileges ON ALL FUNCTIONS IN_P SCHEMA name_list TO grantee_list opt_grant_grant_option
+	| GRANT privileges ON ALL FUNCTIONS IN_P SCHEMA name_list TO grantee_list opt_grant_grant_option opt_granted_by
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     true,
@@ -5463,9 +5491,10 @@ GrantStmt:
 				Privileges:  $2,
 				Grantees:    $10,
 				GrantOption: $11,
+				Grantor:     roleSpecOrNil($12),
 			}
 		}
-	| GRANT privileges ON ALL ROUTINES IN_P SCHEMA name_list TO grantee_list opt_grant_grant_option
+	| GRANT privileges ON ALL ROUTINES IN_P SCHEMA name_list TO grantee_list opt_grant_grant_option opt_granted_by
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     true,
@@ -5475,9 +5504,10 @@ GrantStmt:
 				Privileges:  $2,
 				Grantees:    $10,
 				GrantOption: $11,
+				Grantor:     roleSpecOrNil($12),
 			}
 		}
-	| GRANT privileges ON ALL PROCEDURES IN_P SCHEMA name_list TO grantee_list opt_grant_grant_option
+	| GRANT privileges ON ALL PROCEDURES IN_P SCHEMA name_list TO grantee_list opt_grant_grant_option opt_granted_by
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     true,
@@ -5487,24 +5517,26 @@ GrantStmt:
 				Privileges:  $2,
 				Grantees:    $10,
 				GrantOption: $11,
+				Grantor:     roleSpecOrNil($12),
 			}
 		}
-	| GRANT privileges ON LARGE_P OBJECT_P NumericOnly TO grantee_list opt_grant_grant_option
+	| GRANT privileges ON LARGE_P OBJECT_P NumericOnly_list TO grantee_list opt_grant_grant_option opt_granted_by
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     true,
 				Targtype:    nodes.ACL_TARGET_OBJECT,
 				Objtype:     nodes.OBJECT_LARGEOBJECT,
-				Objects:     makeList($6),
+				Objects:     $6,
 				Privileges:  $2,
 				Grantees:    $8,
 				GrantOption: $9,
+				Grantor:     roleSpecOrNil($10),
 			}
 		}
 	;
 
 RevokeStmt:
-	REVOKE privileges ON TABLE any_name_list FROM grantee_list opt_drop_behavior
+	REVOKE privileges ON TABLE any_name_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:    false,
@@ -5513,10 +5545,11 @@ RevokeStmt:
 				Objects:    makeRangeVarList($5),
 				Privileges: $2,
 				Grantees:   $7,
-				Behavior:   nodes.DropBehavior($8),
+				Grantor:    roleSpecOrNil($8),
+				Behavior:   nodes.DropBehavior($9),
 			}
 		}
-	| REVOKE privileges ON any_name_list FROM grantee_list opt_drop_behavior
+	| REVOKE privileges ON any_name_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:    false,
@@ -5525,10 +5558,11 @@ RevokeStmt:
 				Objects:    makeRangeVarList($4),
 				Privileges: $2,
 				Grantees:   $6,
-				Behavior:   nodes.DropBehavior($7),
+				Grantor:    roleSpecOrNil($7),
+				Behavior:   nodes.DropBehavior($8),
 			}
 		}
-	| REVOKE privileges ON SEQUENCE any_name_list FROM grantee_list opt_drop_behavior
+	| REVOKE privileges ON SEQUENCE any_name_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:    false,
@@ -5537,10 +5571,11 @@ RevokeStmt:
 				Objects:    makeRangeVarList($5),
 				Privileges: $2,
 				Grantees:   $7,
-				Behavior:   nodes.DropBehavior($8),
+				Grantor:    roleSpecOrNil($8),
+				Behavior:   nodes.DropBehavior($9),
 			}
 		}
-	| REVOKE privileges ON FUNCTION function_with_argtypes_list FROM grantee_list opt_drop_behavior
+	| REVOKE privileges ON FUNCTION function_with_argtypes_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:    false,
@@ -5549,10 +5584,11 @@ RevokeStmt:
 				Objects:    $5,
 				Privileges: $2,
 				Grantees:   $7,
-				Behavior:   nodes.DropBehavior($8),
+				Grantor:    roleSpecOrNil($8),
+				Behavior:   nodes.DropBehavior($9),
 			}
 		}
-	| REVOKE privileges ON PROCEDURE function_with_argtypes_list FROM grantee_list opt_drop_behavior
+	| REVOKE privileges ON PROCEDURE function_with_argtypes_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:    false,
@@ -5561,10 +5597,11 @@ RevokeStmt:
 				Objects:    $5,
 				Privileges: $2,
 				Grantees:   $7,
-				Behavior:   nodes.DropBehavior($8),
+				Grantor:    roleSpecOrNil($8),
+				Behavior:   nodes.DropBehavior($9),
 			}
 		}
-	| REVOKE privileges ON ROUTINE function_with_argtypes_list FROM grantee_list opt_drop_behavior
+	| REVOKE privileges ON ROUTINE function_with_argtypes_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:    false,
@@ -5573,10 +5610,11 @@ RevokeStmt:
 				Objects:    $5,
 				Privileges: $2,
 				Grantees:   $7,
-				Behavior:   nodes.DropBehavior($8),
+				Grantor:    roleSpecOrNil($8),
+				Behavior:   nodes.DropBehavior($9),
 			}
 		}
-	| REVOKE privileges ON DATABASE name_list FROM grantee_list opt_drop_behavior
+	| REVOKE privileges ON DATABASE name_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:    false,
@@ -5585,10 +5623,11 @@ RevokeStmt:
 				Objects:    makeNameListAsAnyNameList($5),
 				Privileges: $2,
 				Grantees:   $7,
-				Behavior:   nodes.DropBehavior($8),
+				Grantor:    roleSpecOrNil($8),
+				Behavior:   nodes.DropBehavior($9),
 			}
 		}
-	| REVOKE privileges ON DOMAIN_P any_name_list FROM grantee_list opt_drop_behavior
+	| REVOKE privileges ON DOMAIN_P any_name_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:    false,
@@ -5597,10 +5636,11 @@ RevokeStmt:
 				Objects:    $5,
 				Privileges: $2,
 				Grantees:   $7,
-				Behavior:   nodes.DropBehavior($8),
+				Grantor:    roleSpecOrNil($8),
+				Behavior:   nodes.DropBehavior($9),
 			}
 		}
-	| REVOKE privileges ON LANGUAGE name_list FROM grantee_list opt_drop_behavior
+	| REVOKE privileges ON LANGUAGE name_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:    false,
@@ -5609,10 +5649,11 @@ RevokeStmt:
 				Objects:    makeNameListAsAnyNameList($5),
 				Privileges: $2,
 				Grantees:   $7,
-				Behavior:   nodes.DropBehavior($8),
+				Grantor:    roleSpecOrNil($8),
+				Behavior:   nodes.DropBehavior($9),
 			}
 		}
-	| REVOKE privileges ON SCHEMA name_list FROM grantee_list opt_drop_behavior
+	| REVOKE privileges ON SCHEMA name_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:    false,
@@ -5621,10 +5662,11 @@ RevokeStmt:
 				Objects:    makeNameListAsAnyNameList($5),
 				Privileges: $2,
 				Grantees:   $7,
-				Behavior:   nodes.DropBehavior($8),
+				Grantor:    roleSpecOrNil($8),
+				Behavior:   nodes.DropBehavior($9),
 			}
 		}
-	| REVOKE privileges ON TABLESPACE name_list FROM grantee_list opt_drop_behavior
+	| REVOKE privileges ON TABLESPACE name_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:    false,
@@ -5633,10 +5675,11 @@ RevokeStmt:
 				Objects:    makeNameListAsAnyNameList($5),
 				Privileges: $2,
 				Grantees:   $7,
-				Behavior:   nodes.DropBehavior($8),
+				Grantor:    roleSpecOrNil($8),
+				Behavior:   nodes.DropBehavior($9),
 			}
 		}
-	| REVOKE privileges ON TYPE_P any_name_list FROM grantee_list opt_drop_behavior
+	| REVOKE privileges ON TYPE_P any_name_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:    false,
@@ -5645,10 +5688,11 @@ RevokeStmt:
 				Objects:    $5,
 				Privileges: $2,
 				Grantees:   $7,
-				Behavior:   nodes.DropBehavior($8),
+				Grantor:    roleSpecOrNil($8),
+				Behavior:   nodes.DropBehavior($9),
 			}
 		}
-	| REVOKE privileges ON FOREIGN DATA_P WRAPPER name_list FROM grantee_list opt_drop_behavior
+	| REVOKE privileges ON FOREIGN DATA_P WRAPPER name_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:    false,
@@ -5657,10 +5701,11 @@ RevokeStmt:
 				Objects:    makeNameListAsAnyNameList($7),
 				Privileges: $2,
 				Grantees:   $9,
-				Behavior:   nodes.DropBehavior($10),
+				Grantor:    roleSpecOrNil($10),
+				Behavior:   nodes.DropBehavior($11),
 			}
 		}
-	| REVOKE privileges ON FOREIGN SERVER name_list FROM grantee_list opt_drop_behavior
+	| REVOKE privileges ON FOREIGN SERVER name_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:    false,
@@ -5669,10 +5714,11 @@ RevokeStmt:
 				Objects:    makeNameListAsAnyNameList($6),
 				Privileges: $2,
 				Grantees:   $8,
-				Behavior:   nodes.DropBehavior($9),
+				Grantor:    roleSpecOrNil($9),
+				Behavior:   nodes.DropBehavior($10),
 			}
 		}
-	| REVOKE privileges ON ALL TABLES IN_P SCHEMA name_list FROM grantee_list opt_drop_behavior
+	| REVOKE privileges ON ALL TABLES IN_P SCHEMA name_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:    false,
@@ -5681,10 +5727,11 @@ RevokeStmt:
 				Objects:    makeNameListAsAnyNameList($8),
 				Privileges: $2,
 				Grantees:   $10,
-				Behavior:   nodes.DropBehavior($11),
+				Grantor:    roleSpecOrNil($11),
+				Behavior:   nodes.DropBehavior($12),
 			}
 		}
-	| REVOKE privileges ON ALL SEQUENCES IN_P SCHEMA name_list FROM grantee_list opt_drop_behavior
+	| REVOKE privileges ON ALL SEQUENCES IN_P SCHEMA name_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:    false,
@@ -5693,10 +5740,11 @@ RevokeStmt:
 				Objects:    makeNameListAsAnyNameList($8),
 				Privileges: $2,
 				Grantees:   $10,
-				Behavior:   nodes.DropBehavior($11),
+				Grantor:    roleSpecOrNil($11),
+				Behavior:   nodes.DropBehavior($12),
 			}
 		}
-	| REVOKE privileges ON ALL FUNCTIONS IN_P SCHEMA name_list FROM grantee_list opt_drop_behavior
+	| REVOKE privileges ON ALL FUNCTIONS IN_P SCHEMA name_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:    false,
@@ -5705,10 +5753,11 @@ RevokeStmt:
 				Objects:    makeNameListAsAnyNameList($8),
 				Privileges: $2,
 				Grantees:   $10,
-				Behavior:   nodes.DropBehavior($11),
+				Grantor:    roleSpecOrNil($11),
+				Behavior:   nodes.DropBehavior($12),
 			}
 		}
-	| REVOKE privileges ON ALL ROUTINES IN_P SCHEMA name_list FROM grantee_list opt_drop_behavior
+	| REVOKE privileges ON ALL ROUTINES IN_P SCHEMA name_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:    false,
@@ -5717,10 +5766,11 @@ RevokeStmt:
 				Objects:    makeNameListAsAnyNameList($8),
 				Privileges: $2,
 				Grantees:   $10,
-				Behavior:   nodes.DropBehavior($11),
+				Grantor:    roleSpecOrNil($11),
+				Behavior:   nodes.DropBehavior($12),
 			}
 		}
-	| REVOKE privileges ON ALL PROCEDURES IN_P SCHEMA name_list FROM grantee_list opt_drop_behavior
+	| REVOKE privileges ON ALL PROCEDURES IN_P SCHEMA name_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:    false,
@@ -5729,22 +5779,24 @@ RevokeStmt:
 				Objects:    makeNameListAsAnyNameList($8),
 				Privileges: $2,
 				Grantees:   $10,
-				Behavior:   nodes.DropBehavior($11),
+				Grantor:    roleSpecOrNil($11),
+				Behavior:   nodes.DropBehavior($12),
 			}
 		}
-	| REVOKE privileges ON LARGE_P OBJECT_P NumericOnly FROM grantee_list opt_drop_behavior
+	| REVOKE privileges ON LARGE_P OBJECT_P NumericOnly_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:    false,
 				Targtype:   nodes.ACL_TARGET_OBJECT,
 				Objtype:    nodes.OBJECT_LARGEOBJECT,
-				Objects:    makeList($6),
+				Objects:    $6,
 				Privileges: $2,
 				Grantees:   $8,
-				Behavior:   nodes.DropBehavior($9),
+				Grantor:    roleSpecOrNil($9),
+				Behavior:   nodes.DropBehavior($10),
 			}
 		}
-	| REVOKE GRANT OPTION FOR privileges ON TABLE any_name_list FROM grantee_list opt_drop_behavior
+	| REVOKE GRANT OPTION FOR privileges ON TABLE any_name_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     false,
@@ -5754,10 +5806,11 @@ RevokeStmt:
 				Privileges:  $5,
 				Grantees:    $10,
 				GrantOption: true,
-				Behavior:    nodes.DropBehavior($11),
+				Grantor:     roleSpecOrNil($11),
+				Behavior:    nodes.DropBehavior($12),
 			}
 		}
-	| REVOKE GRANT OPTION FOR privileges ON any_name_list FROM grantee_list opt_drop_behavior
+	| REVOKE GRANT OPTION FOR privileges ON any_name_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     false,
@@ -5767,10 +5820,11 @@ RevokeStmt:
 				Privileges:  $5,
 				Grantees:    $9,
 				GrantOption: true,
-				Behavior:    nodes.DropBehavior($10),
+				Grantor:     roleSpecOrNil($10),
+				Behavior:    nodes.DropBehavior($11),
 			}
 		}
-	| REVOKE GRANT OPTION FOR privileges ON SEQUENCE any_name_list FROM grantee_list opt_drop_behavior
+	| REVOKE GRANT OPTION FOR privileges ON SEQUENCE any_name_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     false,
@@ -5780,10 +5834,11 @@ RevokeStmt:
 				Privileges:  $5,
 				Grantees:    $10,
 				GrantOption: true,
-				Behavior:    nodes.DropBehavior($11),
+				Grantor:     roleSpecOrNil($11),
+				Behavior:    nodes.DropBehavior($12),
 			}
 		}
-	| REVOKE GRANT OPTION FOR privileges ON FUNCTION function_with_argtypes_list FROM grantee_list opt_drop_behavior
+	| REVOKE GRANT OPTION FOR privileges ON FUNCTION function_with_argtypes_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     false,
@@ -5793,10 +5848,11 @@ RevokeStmt:
 				Privileges:  $5,
 				Grantees:    $10,
 				GrantOption: true,
-				Behavior:    nodes.DropBehavior($11),
+				Grantor:     roleSpecOrNil($11),
+				Behavior:    nodes.DropBehavior($12),
 			}
 		}
-	| REVOKE GRANT OPTION FOR privileges ON PROCEDURE function_with_argtypes_list FROM grantee_list opt_drop_behavior
+	| REVOKE GRANT OPTION FOR privileges ON PROCEDURE function_with_argtypes_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     false,
@@ -5806,10 +5862,11 @@ RevokeStmt:
 				Privileges:  $5,
 				Grantees:    $10,
 				GrantOption: true,
-				Behavior:    nodes.DropBehavior($11),
+				Grantor:     roleSpecOrNil($11),
+				Behavior:    nodes.DropBehavior($12),
 			}
 		}
-	| REVOKE GRANT OPTION FOR privileges ON ROUTINE function_with_argtypes_list FROM grantee_list opt_drop_behavior
+	| REVOKE GRANT OPTION FOR privileges ON ROUTINE function_with_argtypes_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     false,
@@ -5819,10 +5876,11 @@ RevokeStmt:
 				Privileges:  $5,
 				Grantees:    $10,
 				GrantOption: true,
-				Behavior:    nodes.DropBehavior($11),
+				Grantor:     roleSpecOrNil($11),
+				Behavior:    nodes.DropBehavior($12),
 			}
 		}
-	| REVOKE GRANT OPTION FOR privileges ON DATABASE name_list FROM grantee_list opt_drop_behavior
+	| REVOKE GRANT OPTION FOR privileges ON DATABASE name_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     false,
@@ -5832,10 +5890,11 @@ RevokeStmt:
 				Privileges:  $5,
 				Grantees:    $10,
 				GrantOption: true,
-				Behavior:    nodes.DropBehavior($11),
+				Grantor:     roleSpecOrNil($11),
+				Behavior:    nodes.DropBehavior($12),
 			}
 		}
-	| REVOKE GRANT OPTION FOR privileges ON DOMAIN_P any_name_list FROM grantee_list opt_drop_behavior
+	| REVOKE GRANT OPTION FOR privileges ON DOMAIN_P any_name_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     false,
@@ -5845,10 +5904,11 @@ RevokeStmt:
 				Privileges:  $5,
 				Grantees:    $10,
 				GrantOption: true,
-				Behavior:    nodes.DropBehavior($11),
+				Grantor:     roleSpecOrNil($11),
+				Behavior:    nodes.DropBehavior($12),
 			}
 		}
-	| REVOKE GRANT OPTION FOR privileges ON LANGUAGE name_list FROM grantee_list opt_drop_behavior
+	| REVOKE GRANT OPTION FOR privileges ON LANGUAGE name_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     false,
@@ -5858,10 +5918,11 @@ RevokeStmt:
 				Privileges:  $5,
 				Grantees:    $10,
 				GrantOption: true,
-				Behavior:    nodes.DropBehavior($11),
+				Grantor:     roleSpecOrNil($11),
+				Behavior:    nodes.DropBehavior($12),
 			}
 		}
-	| REVOKE GRANT OPTION FOR privileges ON SCHEMA name_list FROM grantee_list opt_drop_behavior
+	| REVOKE GRANT OPTION FOR privileges ON SCHEMA name_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     false,
@@ -5871,10 +5932,11 @@ RevokeStmt:
 				Privileges:  $5,
 				Grantees:    $10,
 				GrantOption: true,
-				Behavior:    nodes.DropBehavior($11),
+				Grantor:     roleSpecOrNil($11),
+				Behavior:    nodes.DropBehavior($12),
 			}
 		}
-	| REVOKE GRANT OPTION FOR privileges ON TABLESPACE name_list FROM grantee_list opt_drop_behavior
+	| REVOKE GRANT OPTION FOR privileges ON TABLESPACE name_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     false,
@@ -5884,10 +5946,11 @@ RevokeStmt:
 				Privileges:  $5,
 				Grantees:    $10,
 				GrantOption: true,
-				Behavior:    nodes.DropBehavior($11),
+				Grantor:     roleSpecOrNil($11),
+				Behavior:    nodes.DropBehavior($12),
 			}
 		}
-	| REVOKE GRANT OPTION FOR privileges ON TYPE_P any_name_list FROM grantee_list opt_drop_behavior
+	| REVOKE GRANT OPTION FOR privileges ON TYPE_P any_name_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     false,
@@ -5897,10 +5960,11 @@ RevokeStmt:
 				Privileges:  $5,
 				Grantees:    $10,
 				GrantOption: true,
-				Behavior:    nodes.DropBehavior($11),
+				Grantor:     roleSpecOrNil($11),
+				Behavior:    nodes.DropBehavior($12),
 			}
 		}
-	| REVOKE GRANT OPTION FOR privileges ON FOREIGN DATA_P WRAPPER name_list FROM grantee_list opt_drop_behavior
+	| REVOKE GRANT OPTION FOR privileges ON FOREIGN DATA_P WRAPPER name_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     false,
@@ -5910,10 +5974,11 @@ RevokeStmt:
 				Privileges:  $5,
 				Grantees:    $12,
 				GrantOption: true,
-				Behavior:    nodes.DropBehavior($13),
+				Grantor:     roleSpecOrNil($13),
+				Behavior:    nodes.DropBehavior($14),
 			}
 		}
-	| REVOKE GRANT OPTION FOR privileges ON FOREIGN SERVER name_list FROM grantee_list opt_drop_behavior
+	| REVOKE GRANT OPTION FOR privileges ON FOREIGN SERVER name_list FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     false,
@@ -5923,7 +5988,8 @@ RevokeStmt:
 				Privileges:  $5,
 				Grantees:    $11,
 				GrantOption: true,
-				Behavior:    nodes.DropBehavior($12),
+				Grantor:     roleSpecOrNil($12),
+				Behavior:    nodes.DropBehavior($13),
 			}
 		}
 	;
@@ -8193,6 +8259,12 @@ relation_expr:
 			rv.(*nodes.RangeVar).Inh = false
 			$$ = rv
 		}
+	| ONLY '(' qualified_name ')'
+		{
+			rv := makeRangeVar($3)
+			rv.(*nodes.RangeVar).Inh = false
+			$$ = rv
+		}
 	;
 
 opt_alias_clause:
@@ -8992,6 +9064,11 @@ a_expr:
 			}
 			$$ = makeAExprFromList(kind, $2, $1, $5)
 		}
+	| UNIQUE opt_unique_null_treatment select_with_parens
+		{
+			pglex.Error("UNIQUE predicate is not yet implemented")
+			$$ = nil
+		}
 	| a_expr COLLATE any_name
 		{
 			$$ = &nodes.CollateClause{
@@ -9070,9 +9147,13 @@ sub_type:
 	;
 
 subquery_Op:
-	Op
+	all_Op
 		{
 			$$ = makeList(&nodes.String{Str: $1})
+		}
+	| OPERATOR '(' any_operator ')'
+		{
+			$$ = $3
 		}
 	| LIKE
 		{
@@ -9089,30 +9170,6 @@ subquery_Op:
 	| NOT_LA ILIKE
 		{
 			$$ = makeList(&nodes.String{Str: "!~~*"})
-		}
-	| '='
-		{
-			$$ = makeList(&nodes.String{Str: "="})
-		}
-	| '<'
-		{
-			$$ = makeList(&nodes.String{Str: "<"})
-		}
-	| '>'
-		{
-			$$ = makeList(&nodes.String{Str: ">"})
-		}
-	| LESS_EQUALS
-		{
-			$$ = makeList(&nodes.String{Str: "<="})
-		}
-	| GREATER_EQUALS
-		{
-			$$ = makeList(&nodes.String{Str: ">="})
-		}
-	| NOT_EQUALS
-		{
-			$$ = makeList(&nodes.String{Str: "<>"})
 		}
 	;
 
@@ -9382,6 +9439,18 @@ c_expr:
 				SubLinkType: int(nodes.EXPR_SUBLINK),
 				Subselect:   $1,
 				Location:    -1,
+			}
+		}
+	| select_with_parens indirection
+		{
+			sublink := &nodes.SubLink{
+				SubLinkType: int(nodes.EXPR_SUBLINK),
+				Subselect:   $1,
+				Location:    -1,
+			}
+			$$ = &nodes.A_Indirection{
+				Arg:         sublink,
+				Indirection: $2,
 			}
 		}
 	| EXISTS select_with_parens
@@ -9807,6 +9876,15 @@ func_expr_common_subexpr:
 				Location:   -1,
 			}
 		}
+	| OVERLAY '(' func_arg_list_opt ')'
+		{
+			$$ = &nodes.FuncCall{
+				Funcname:   makeFuncName("overlay"),
+				Args:       $3,
+				FuncFormat: int(nodes.COERCE_EXPLICIT_CALL),
+				Location:   -1,
+			}
+		}
 	| POSITION '(' position_list ')'
 		{
 			$$ = &nodes.FuncCall{
@@ -9822,6 +9900,33 @@ func_expr_common_subexpr:
 				Funcname:   makeFuncName("pg_catalog", "substring"),
 				Args:       $3,
 				FuncFormat: int(nodes.COERCE_SQL_SYNTAX),
+				Location:   -1,
+			}
+		}
+	| SUBSTRING '(' func_arg_list_opt ')'
+		{
+			$$ = &nodes.FuncCall{
+				Funcname:   makeFuncName("substring"),
+				Args:       $3,
+				FuncFormat: int(nodes.COERCE_EXPLICIT_CALL),
+				Location:   -1,
+			}
+		}
+	| TREAT '(' a_expr AS Typename ')'
+		{
+			funcName := ""
+			if $5 != nil && $5.Names != nil && len($5.Names.Items) > 0 {
+				if nameNode, ok := $5.Names.Items[len($5.Names.Items)-1].(*nodes.String); ok {
+					funcName = nameNode.Str
+				}
+			}
+			if funcName == "" {
+				funcName = "treat"
+			}
+			$$ = &nodes.FuncCall{
+				Funcname:   makeFuncName("pg_catalog", funcName),
+				Args:       makeList($3),
+				FuncFormat: int(nodes.COERCE_EXPLICIT_CALL),
 				Location:   -1,
 			}
 		}
@@ -10821,6 +10926,17 @@ func_arg_list:
 		}
 	;
 
+func_arg_list_opt:
+	func_arg_list
+		{
+			$$ = $1
+		}
+	| /* EMPTY */
+		{
+			$$ = nil
+		}
+	;
+
 func_arg_expr:
 	a_expr { $$ = $1 }
 	| param_name COLON_EQUALS a_expr
@@ -11271,6 +11387,57 @@ Character:
 				$$ = makeTypeName("bpchar")
 			}
 		}
+	| NATIONAL CHARACTER opt_varying '(' Iconst ')'
+		{
+			if $3 {
+				$$ = makeTypeName("varchar")
+			} else {
+				$$ = makeTypeName("bpchar")
+			}
+			$$.Typmods = makeList(&nodes.Integer{Ival: $5})
+		}
+	| NATIONAL CHARACTER opt_varying
+		{
+			if $3 {
+				$$ = makeTypeName("varchar")
+			} else {
+				$$ = makeTypeName("bpchar")
+			}
+		}
+	| NATIONAL CHAR_P opt_varying '(' Iconst ')'
+		{
+			if $3 {
+				$$ = makeTypeName("varchar")
+			} else {
+				$$ = makeTypeName("bpchar")
+			}
+			$$.Typmods = makeList(&nodes.Integer{Ival: $5})
+		}
+	| NATIONAL CHAR_P opt_varying
+		{
+			if $3 {
+				$$ = makeTypeName("varchar")
+			} else {
+				$$ = makeTypeName("bpchar")
+			}
+		}
+	| NCHAR opt_varying '(' Iconst ')'
+		{
+			if $2 {
+				$$ = makeTypeName("varchar")
+			} else {
+				$$ = makeTypeName("bpchar")
+			}
+			$$.Typmods = makeList(&nodes.Integer{Ival: $4})
+		}
+	| NCHAR opt_varying
+		{
+			if $2 {
+				$$ = makeTypeName("varchar")
+			} else {
+				$$ = makeTypeName("bpchar")
+			}
+		}
 	| VARCHAR '(' Iconst ')'
 		{
 			$$ = makeTypeName("varchar")
@@ -11362,6 +11529,57 @@ ConstCharacter:
 			$$.Typmods = makeList(&nodes.Integer{Ival: $4})
 		}
 	| CHAR_P opt_varying
+		{
+			if $2 {
+				$$ = makeTypeName("varchar")
+			} else {
+				$$ = makeTypeName("bpchar")
+			}
+		}
+	| NATIONAL CHARACTER opt_varying '(' Iconst ')'
+		{
+			if $3 {
+				$$ = makeTypeName("varchar")
+			} else {
+				$$ = makeTypeName("bpchar")
+			}
+			$$.Typmods = makeList(&nodes.Integer{Ival: $5})
+		}
+	| NATIONAL CHARACTER opt_varying
+		{
+			if $3 {
+				$$ = makeTypeName("varchar")
+			} else {
+				$$ = makeTypeName("bpchar")
+			}
+		}
+	| NATIONAL CHAR_P opt_varying '(' Iconst ')'
+		{
+			if $3 {
+				$$ = makeTypeName("varchar")
+			} else {
+				$$ = makeTypeName("bpchar")
+			}
+			$$.Typmods = makeList(&nodes.Integer{Ival: $5})
+		}
+	| NATIONAL CHAR_P opt_varying
+		{
+			if $3 {
+				$$ = makeTypeName("varchar")
+			} else {
+				$$ = makeTypeName("bpchar")
+			}
+		}
+	| NCHAR opt_varying '(' Iconst ')'
+		{
+			if $2 {
+				$$ = makeTypeName("varchar")
+			} else {
+				$$ = makeTypeName("bpchar")
+			}
+			$$.Typmods = makeList(&nodes.Integer{Ival: $4})
+		}
+	| NCHAR opt_varying
 		{
 			if $2 {
 				$$ = makeTypeName("varchar")
@@ -15640,7 +15858,7 @@ DefACLOption:
 	;
 
 DefACLAction:
-	GRANT privileges ON defacl_privilege_target TO grantee_list opt_grant_grant_option
+	GRANT privileges ON defacl_privilege_target TO grantee_list opt_grant_grant_option opt_granted_by
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     true,
@@ -15649,9 +15867,10 @@ DefACLAction:
 				Objtype:     nodes.ObjectType($4),
 				Grantees:    $6,
 				GrantOption: $7,
+				Grantor:     roleSpecOrNil($8),
 			}
 		}
-	| REVOKE privileges ON defacl_privilege_target FROM grantee_list opt_drop_behavior
+	| REVOKE privileges ON defacl_privilege_target FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:    false,
@@ -15659,10 +15878,11 @@ DefACLAction:
 				Targtype:   nodes.ACL_TARGET_DEFAULTS,
 				Objtype:    nodes.ObjectType($4),
 				Grantees:   $6,
-				Behavior:   nodes.DropBehavior($7),
+				Grantor:    roleSpecOrNil($7),
+				Behavior:   nodes.DropBehavior($8),
 			}
 		}
-	| REVOKE GRANT OPTION FOR privileges ON defacl_privilege_target FROM grantee_list opt_drop_behavior
+	| REVOKE GRANT OPTION FOR privileges ON defacl_privilege_target FROM grantee_list opt_granted_by opt_drop_behavior
 		{
 			$$ = &nodes.GrantStmt{
 				IsGrant:     false,
@@ -15671,7 +15891,8 @@ DefACLAction:
 				Targtype:    nodes.ACL_TARGET_DEFAULTS,
 				Objtype:     nodes.ObjectType($7),
 				Grantees:    $9,
-				Behavior:    nodes.DropBehavior($10),
+				Grantor:     roleSpecOrNil($10),
+				Behavior:    nodes.DropBehavior($11),
 			}
 		}
 	;
@@ -16355,24 +16576,33 @@ opt_with_data:
 		{ $$ = true }
 	;
 
+OptNoLog:
+	UNLOGGED
+		{ $$ = int64(nodes.RELPERSISTENCE_UNLOGGED) }
+	| /* EMPTY */
+		{ $$ = int64(nodes.RELPERSISTENCE_PERMANENT) }
+	;
+
 CreateMatViewStmt:
-	CREATE MATERIALIZED VIEW create_mv_target AS SelectStmt opt_with_data
+	CREATE OptNoLog MATERIALIZED VIEW create_mv_target AS SelectStmt opt_with_data
 		{
-			into := $4.(*nodes.IntoClause)
-			into.SkipData = !$7
+			into := $5.(*nodes.IntoClause)
+			into.Rel.Relpersistence = byte($2)
+			into.SkipData = !$8
 			$$ = &nodes.CreateTableAsStmt{
-				Query:       $6,
+				Query:       $7,
 				Into:        into,
 				Objtype:     nodes.OBJECT_MATVIEW,
 				IfNotExists: false,
 			}
 		}
-	| CREATE MATERIALIZED VIEW IF_P NOT EXISTS create_mv_target AS SelectStmt opt_with_data
+	| CREATE OptNoLog MATERIALIZED VIEW IF_P NOT EXISTS create_mv_target AS SelectStmt opt_with_data
 		{
-			into := $7.(*nodes.IntoClause)
-			into.SkipData = !$10
+			into := $8.(*nodes.IntoClause)
+			into.Rel.Relpersistence = byte($2)
+			into.SkipData = !$11
 			$$ = &nodes.CreateTableAsStmt{
-				Query:       $9,
+				Query:       $10,
 				Into:        into,
 				Objtype:     nodes.OBJECT_MATVIEW,
 				IfNotExists: true,
