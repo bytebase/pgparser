@@ -608,58 +608,10 @@ func (l *Lexer) lexQuoteContinue() Token {
 	case stateXUS:
 		// Unicode string: U&'...'
 		// Check for UESCAPE clause
-		escapeChar := '\\'
-
-		// Look ahead for UESCAPE 'x'
-		// We need to skip whitespace/comments first
-		savedPos := l.pos
-		l.skipWhitespaceAndComments()
-
-		// Check for UESCAPE keyword (case insensitive)
-		if l.pos+7 <= len(l.input) {
-			word := l.input[l.pos : l.pos+7]
-			if strings.EqualFold(word, "UESCAPE") {
-				l.pos += 7
-				l.skipWhitespaceAndComments()
-				// Expect single quoted string
-				if l.pos < len(l.input) && l.input[l.pos] == '\'' {
-					l.pos++
-					// Get escape char
-					if l.pos < len(l.input) {
-						ch := l.input[l.pos]
-						escapeChar = rune(ch)
-						// Verify single char
-						// We need to handle potential escaped quote or just single char
-						// Postgres allows 'x' or '' (empty means no escape, but that's handled during decoding maybe? No, 'no escape' means backslash is literal)
-						// Actually '' is "no escape char".
-
-						// Basic check: consume char
-						l.pos++
-						// Handle quoted quote ''
-						if ch == '\'' && l.pos < len(l.input) && l.input[l.pos] == '\'' {
-							// It was '' inside '...' -> literal quote as escape char
-							escapeChar = '\''
-							l.pos++
-						}
-
-						// Must end with quote
-						if l.pos < len(l.input) && l.input[l.pos] == '\'' {
-							l.pos++
-						} else {
-							// Invalid UESCAPE clause, rollback
-							l.pos = savedPos
-						}
-					} else {
-						l.pos = savedPos
-					}
-				} else {
-					l.pos = savedPos
-				}
-			} else {
-				l.pos = savedPos
-			}
-		} else {
-			l.pos = savedPos
+		escapeChar, err := l.scanUESCAPE()
+		if err != nil {
+			l.Err = err
+			return Token{Type: lex_EOF, Loc: l.start}
 		}
 
 		// Decode the string using the determined escape char
@@ -670,6 +622,25 @@ func (l *Lexer) lexQuoteContinue() Token {
 		}
 
 		return Token{Type: lex_USCONST, Str: decoded, Loc: l.start}
+	case stateXUI:
+		// Unicode identifier: U&"..."
+		// Check for UESCAPE clause
+		// fmt.Printf("DEBUG: checking UESCAPE for identifier %s\n", str)
+		escapeChar, err := l.scanUESCAPE()
+		if err != nil {
+			l.Err = err
+			return Token{Type: lex_EOF, Loc: l.start}
+		}
+
+		// Decode the string using the determined escape char
+		decoded, err := l.decodeUnicodeString(str, escapeChar)
+		if err != nil {
+			l.Err = err
+			return Token{Type: lex_EOF, Loc: l.start}
+		}
+
+		// It's an identifier
+		return Token{Type: lex_IDENT, Str: decoded, Loc: l.start}
 	default:
 		return Token{Type: lex_SCONST, Str: str, Loc: l.start}
 	}
@@ -718,17 +689,21 @@ func (l *Lexer) lexDelimitedIdent() Token {
 				continue
 			}
 			// End of identifier
+			oldState := l.state
 			l.state = stateInitial
+
+			// If it's a Unicode identifier (U&"..."), we need to handle optional UESCAPE
+			if oldState == stateXUI {
+				l.stateBeforeStrStop = stateXUI
+				return l.lexQuoteContinue()
+			}
+
 			str := l.literalbuf.String()
 			if str == "" {
 				l.Err = fmt.Errorf("zero-length delimited identifier")
 				return Token{Type: lex_EOF, Loc: l.start}
 			}
-			tokType := lex_IDENT
-			if l.state == stateXUI {
-				tokType = lex_UIDENT
-			}
-			return Token{Type: tokType, Str: str, Loc: l.start}
+			return Token{Type: lex_IDENT, Str: str, Loc: l.start}
 		}
 
 		l.literalbuf.WriteByte(ch)
@@ -1185,6 +1160,51 @@ func isValidUnicodeCodepoint(r rune) bool {
 
 func isSpaceByte(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'
+}
+
+// scanUESCAPE attempts to scan a UESCAPE clause.
+// It returns the escape character (default backslash) and any error encountered.
+// If no UESCAPE clause is present, it returns '\\' and nil.
+// If a UESCAPE clause is present but invalid, it rewinds and returns '\\', nil,
+// effectively treating "UESCAPE" as the next token.
+func (l *Lexer) scanUESCAPE() (rune, error) {
+	escapeChar := '\\'
+	savedPos := l.pos
+
+	l.skipWhitespaceAndComments()
+
+	if l.pos+7 <= len(l.input) {
+		word := l.input[l.pos : l.pos+7]
+		if strings.EqualFold(word, "UESCAPE") {
+			l.pos += 7
+			l.skipWhitespaceAndComments()
+
+			if l.pos < len(l.input) && l.input[l.pos] == '\'' {
+				l.pos++
+				if l.pos < len(l.input) {
+					ch := l.input[l.pos]
+					escapeChar = rune(ch)
+					l.pos++
+
+					if ch == '\'' && l.pos < len(l.input) && l.input[l.pos] == '\'' {
+						escapeChar = '\''
+						l.pos++
+					}
+
+					if l.pos < len(l.input) && l.input[l.pos] == '\'' {
+						l.pos++
+						return escapeChar, nil
+					}
+				}
+			}
+			// Invalid UESCAPE clause, rollback
+			l.pos = savedPos
+			return '\\', nil
+		}
+	}
+
+	l.pos = savedPos
+	return '\\', nil
 }
 
 // skipWhitespaceAndComments skips whitespace and comments (both -- and /* */).

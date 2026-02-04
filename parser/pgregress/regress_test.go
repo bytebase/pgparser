@@ -249,6 +249,8 @@ func TestPGRegressStats(t *testing.T) {
 		totalPsqlVar += psqlVar
 	}
 
+	knownFailures := loadKnownFailures(t)
+
 	// Print per-file results
 	for _, s := range stats {
 		rate := float64(0)
@@ -258,12 +260,46 @@ func TestPGRegressStats(t *testing.T) {
 		status := "OK"
 		if s.passed < s.total {
 			failures := s.total - s.passed
+
+			// Determine if failures are expected
+			kf := knownFailures[s.name]
+			// We can't verify EXACTLY which ones failed here without re-running or storing failure indices in stats
+			// But heuristically, if failure count matches known failure count, we can mark it differently
+
+			statusLabel := "PARTIAL"
+			// Adjust failure count by subtracting known failures
+			// This is a rough heuristic for the stats summary
+			// For precise checking, TestPGRegress is used.
+
+			// Actually, let's just leave it as is for now, but maybe add "KNOWN" label if count matches?
+			if len(kf) > 0 && failures == len(kf)+s.psqlVar { // Assuming psqlVar are separate from parse failures
+				// psqlVar are separate because they failed parsing
+				// Wait, in the loop: if err!=nil -> passed not incremented.
+				// If psqlVar -> psqlVar incremented.
+				// failures = total - passed.
+				// parseErr != nil -> failures++.
+				// psqlVar is a subset of failures?
+				// Loop logic:
+				// if err == nil: passed++
+				// else:
+				//    if hasPsqlVar: psqlVar++
+				//    else: // regular failure
+				//
+				// So failures = psqlVar + regular_failures.
+				// Regular failures should match len(kf) ideally.
+
+				if failures == len(kf)+s.psqlVar {
+					statusLabel = "KNOWN-FAIL"
+				}
+			}
+
 			if s.psqlVar > 0 {
-				status = fmt.Sprintf("PARTIAL (%d failures, %d psql-var)", failures, s.psqlVar)
+				status = fmt.Sprintf("%s (%d failures, %d psql-var)", statusLabel, failures, s.psqlVar)
 			} else {
-				status = fmt.Sprintf("PARTIAL (%d failures)", failures)
+				status = fmt.Sprintf("%s (%d failures)", statusLabel, failures)
 			}
 		}
+
 		t.Logf("%-40s %4d/%4d (%5.1f%%) %s", s.name, s.passed, s.total, rate, status)
 	}
 
