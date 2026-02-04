@@ -242,9 +242,9 @@ func splitStatements(filename string, lines []processedLine) []ExtractedStmt {
 	hasContent := false // true if buf has non-whitespace content
 	hasSQL := false     // true if buf has non-comment SQL content
 	inCopyData := false
-	parenDepth := 0     // tracks nesting depth of (...) in normal SQL
-	atomicDepth := 0    // tracks nesting depth of BEGIN ATOMIC ... END blocks
-	lastWord := ""      // previous completed word (uppercase)
+	parenDepth := 0         // tracks nesting depth of (...) in normal SQL
+	atomicDepth := 0        // tracks nesting depth of BEGIN ATOMIC ... END blocks
+	lastWord := ""          // previous completed word (uppercase)
 	currentWord := []byte{} // word currently being accumulated
 
 	// finishWord is called when a non-identifier character is seen in stNormal.
@@ -563,25 +563,43 @@ func isSpaceByte(c byte) bool {
 // to avoid false positives from colons inside strings or comments. It correctly
 // skips :: (PostgreSQL type cast) and := (PL/pgSQL assignment).
 func ContainsPsqlVariable(sql string) bool {
-	// Quick exit: no colon means no psql variable possible.
+	_, replaced := ReplacePsqlVariables(sql)
+	return replaced
+}
+
+// ReplacePsqlVariables replaces psql variable interpolation patterns with
+// valid SQL placeholders, allowing the statement to be parsed for grammar checking.
+// Returns the sanitized SQL and true if any replacements were made.
+//
+// Replacements:
+//
+//	:varname   -> psql_var
+//	:'varname' -> 'psql_var'
+//	:"varname" -> "psql_var"
+func ReplacePsqlVariables(sql string) (string, bool) {
+	// Quick exit
 	if !strings.Contains(sql, ":") {
-		return false
+		return sql, false
 	}
+
+	var buf strings.Builder
+	buf.Grow(len(sql))
 
 	n := len(sql)
 	i := 0
+	replaced := false
 
 	for i < n {
 		ch := sql[i]
 
 		switch {
-		// Single-quoted string: skip contents
+		// Single-quoted string
 		case ch == '\'':
+			start := i
 			i++
 			for i < n {
 				if sql[i] == '\'' {
 					i++
-					// '' is an escaped quote, keep going
 					if i < n && sql[i] == '\'' {
 						i++
 						continue
@@ -589,9 +607,6 @@ func ContainsPsqlVariable(sql string) bool {
 					break
 				}
 				if sql[i] == '\\' {
-					// Handle E-string backslash escapes (also handles
-					// standard_conforming_strings=off). Being conservative
-					// and skipping after backslash is safe either way.
 					i++
 					if i < n {
 						i++
@@ -600,29 +615,31 @@ func ContainsPsqlVariable(sql string) bool {
 				}
 				i++
 			}
+			buf.WriteString(sql[start:i])
 
-		// Double-quoted identifier: skip contents
+		// Double-quoted identifier
 		case ch == '"':
+			start := i
 			i++
 			for i < n {
 				if sql[i] == '"' {
 					i++
 					if i < n && sql[i] == '"' {
-						i++ // escaped ""
+						i++
 						continue
 					}
 					break
 				}
 				i++
 			}
+			buf.WriteString(sql[start:i])
 
-		// Dollar-quoted string: skip contents
+		// Dollar-quoted string
 		case ch == '$':
 			tag := tryParseDollarTagStr(sql, i)
 			if tag != "" {
-				// Skip past opening tag
+				start := i
 				i += len(tag)
-				// Find closing tag
 				for i < n {
 					if sql[i] == '$' && i+len(tag) <= n && sql[i:i+len(tag)] == tag {
 						i += len(tag)
@@ -630,19 +647,24 @@ func ContainsPsqlVariable(sql string) bool {
 					}
 					i++
 				}
+				buf.WriteString(sql[start:i])
 			} else {
+				buf.WriteByte(ch)
 				i++
 			}
 
-		// Line comment: skip to end of line
+		// Line comment
 		case ch == '-' && i+1 < n && sql[i+1] == '-':
+			start := i
 			i += 2
 			for i < n && sql[i] != '\n' {
 				i++
 			}
+			buf.WriteString(sql[start:i])
 
-		// Block comment: skip contents (with nesting)
+		// Block comment
 		case ch == '/' && i+1 < n && sql[i+1] == '*':
+			start := i
 			i += 2
 			depth := 1
 			for i < n && depth > 0 {
@@ -656,40 +678,90 @@ func ContainsPsqlVariable(sql string) bool {
 					i++
 				}
 			}
+			buf.WriteString(sql[start:i])
 
-		// Colon: check for psql variable vs type cast vs assignment
+		// Colon: check for psql variable
 		case ch == ':':
+			isVar := false
+			replType := 0 // 0: :var, 1: :'var', 2: :"var"
+			varEnd := i + 1
+
 			if i+1 < n {
 				next := sql[i+1]
-				// :: is a PostgreSQL type cast — skip both colons
+				// :: type cast
 				if next == ':' {
+					buf.WriteString("::")
 					i += 2
 					continue
 				}
-				// := is a PL/pgSQL assignment — skip
+				// := assignment
 				if next == '=' {
+					buf.WriteString(":=")
 					i += 2
 					continue
 				}
-				// :letter or :underscore is a psql variable
+				// :varname
 				if isIdentStart(next) {
-					return true
-				}
-				// :'...' is a psql quoted variable
-				if next == '\'' {
-					return true
-				}
-				// :"..." is a psql double-quoted variable
-				if next == '"' {
-					return true
+					isVar = true
+					replType = 0
+					varEnd = i + 2
+					for varEnd < n && isIdentCont(sql[varEnd]) {
+						varEnd++
+					}
+				} else if next == '\'' {
+					// :'varname'
+					isVar = true
+					replType = 1
+					// Scan until closing quote
+					varEnd = i + 2 // skip :'
+					// Note: psql variable names inside quotes can contain anything but quote?
+					// Standard psql says "The variable name must be surrounded by single quotes"
+					// We'll just scan until the next single quote.
+					for varEnd < n {
+						if sql[varEnd] == '\'' {
+							// Check for escaped quote? psql variables usually simple.
+							// Assuming simple variable names for regression tests.
+							varEnd++
+							break
+						}
+						varEnd++
+					}
+				} else if next == '"' {
+					// :"varname"
+					isVar = true
+					replType = 2
+					varEnd = i + 2 // skip :"
+					for varEnd < n {
+						if sql[varEnd] == '"' {
+							varEnd++
+							break
+						}
+						varEnd++
+					}
 				}
 			}
-			i++
+
+			if isVar {
+				replaced = true
+				switch replType {
+				case 0:
+					buf.WriteString("psql_var")
+				case 1:
+					buf.WriteString("'psql_var'")
+				case 2:
+					buf.WriteString("\"psql_var\"")
+				}
+				i = varEnd
+			} else {
+				buf.WriteByte(ch)
+				i++
+			}
 
 		default:
+			buf.WriteByte(ch)
 			i++
 		}
 	}
 
-	return false
+	return buf.String(), replaced
 }

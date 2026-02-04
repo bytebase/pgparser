@@ -82,7 +82,11 @@ func TestPGRegress(t *testing.T) {
 			var failIndices []int
 
 			for i, stmt := range stmts {
-				_, parseErr := parser.Parse(stmt.SQL)
+				sqlToParse := stmt.SQL
+				if stmt.HasPsqlVar {
+					sqlToParse, _ = ReplacePsqlVariables(stmt.SQL)
+				}
+				_, parseErr := parser.Parse(sqlToParse)
 				isKnown := intSliceContains(kf, i)
 
 				if parseErr != nil {
@@ -195,7 +199,11 @@ func TestPGRegressStats(t *testing.T) {
 		passed := 0
 		psqlVar := 0
 		for _, stmt := range stmts {
-			if _, err := parser.Parse(stmt.SQL); err == nil {
+			sql := stmt.SQL
+			if stmt.HasPsqlVar {
+				sql, _ = ReplacePsqlVariables(stmt.SQL)
+			}
+			if _, err := parser.Parse(sql); err == nil {
 				passed++
 			} else if stmt.HasPsqlVar {
 				psqlVar++

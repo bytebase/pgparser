@@ -373,9 +373,9 @@ func TestBackslashCommandHandling(t *testing.T) {
 
 func TestBackslashCommandEdgeCases(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
-		wantSQL  []string
+		name    string
+		input   string
+		wantSQL []string
 	}{
 		{
 			name:    "gset terminates statement",
@@ -503,4 +503,37 @@ func containsDollarQuoteEnd(s string) bool {
 		}
 	}
 	return count%2 == 0
+}
+
+func TestReplacePsqlVariables(t *testing.T) {
+	tests := []struct {
+		name     string
+		sql      string
+		want     string
+		replaced bool
+	}{
+		{"no var", "SELECT 1", "SELECT 1", false},
+		{"simple var", "SELECT :var", "SELECT psql_var", true},
+		{"quoted var", "SELECT :'var'", "SELECT 'psql_var'", true},
+		{"double-quoted var", `SELECT :"var"`, `SELECT "psql_var"`, true},
+		{"mixed vars", `SELECT :a, :'b', :"c"`, `SELECT psql_var, 'psql_var', "psql_var"`, true},
+		{"assignment skip", "SELECT x := 1", "SELECT x := 1", false},
+		{"cast skip", "SELECT x::int", "SELECT x::int", false},
+		{"string skip", "SELECT ':var'", "SELECT ':var'", false},
+		{"comment skip", "SELECT 1 -- :var", "SELECT 1 -- :var", false},
+		{"var with suffix", "SELECT :my_var", "SELECT psql_var", true},
+		{"var mid-statement", "SELECT * FROM :tablename WHERE x = :val", "SELECT * FROM psql_var WHERE x = psql_var", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, replaced := ReplacePsqlVariables(tt.sql)
+			if replaced != tt.replaced {
+				t.Errorf("ReplacePsqlVariables(%q) replaced = %v, want %v", tt.sql, replaced, tt.replaced)
+			}
+			if got != tt.want {
+				t.Errorf("ReplacePsqlVariables(%q) = %q, want %q", tt.sql, got, tt.want)
+			}
+		})
+	}
 }
