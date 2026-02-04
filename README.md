@@ -73,10 +73,10 @@ go test ./...
 go test ./parser/pgregress -run TestPGRegressStats -v
 ```
 
-## License
-
-This project is licensed under the MIT License. Portions derived from PostgreSQL are subject to the PostgreSQL License.
-
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=bytebase/pgparser&type=date&legend=top-left)](https://www.star-history.com/#bytebase/pgparser&type=date&legend=top-left)
+
+## License
+
+This project is licensed under the MIT License. Portions derived from PostgreSQL are subject to the PostgreSQL License.
