@@ -246,10 +246,10 @@ import (
 %type <boolean>  opt_transaction_chain
 %type <node>  ExplainStmt ExplainableStmt
 %type <node>  CopyStmt
-%type <boolean>  copy_from
+%type <boolean>  copy_from opt_program
 %type <str>   copy_file_name
-%type <list>  utility_option_list copy_opt_list transaction_mode_list transaction_mode_list_or_empty
-%type <node>  copy_opt_item transaction_mode_item
+%type <list>  utility_option_list copy_opt_list copy_options transaction_mode_list transaction_mode_list_or_empty
+%type <node>  copy_opt_item opt_binary copy_delimiter transaction_mode_item
 %type <str>   iso_level
 %type <node>  utility_option_elem
 %type <str>   utility_option_name
@@ -4997,92 +4997,39 @@ ExplainableStmt:
  *****************************************************************************/
 
 CopyStmt:
-	COPY relation_expr opt_column_list copy_from copy_file_name copy_opt_with '(' utility_option_list ')' where_clause
+	COPY opt_binary relation_expr opt_column_list
+			copy_from opt_program copy_file_name copy_delimiter copy_opt_with
+			copy_options where_clause
 		{
-			rv := $2.(*nodes.RangeVar)
-			$$ = &nodes.CopyStmt{
+			rv := $3.(*nodes.RangeVar)
+			stmt := &nodes.CopyStmt{
 				Relation:    rv,
-				Attlist:     $3,
-				IsFrom:      $4,
-				Filename:    $5,
-				Options:     $8,
-				WhereClause: $10,
-			}
-		}
-	| COPY relation_expr opt_column_list copy_from copy_file_name copy_opt_list where_clause
-		{
-			rv := $2.(*nodes.RangeVar)
-			$$ = &nodes.CopyStmt{
-				Relation:    rv,
-				Attlist:     $3,
-				IsFrom:      $4,
-				Filename:    $5,
-				Options:     $6,
-				WhereClause: $7,
-			}
-		}
-	| COPY relation_expr opt_column_list copy_from PROGRAM Sconst copy_opt_with '(' utility_option_list ')' where_clause
-		{
-			rv := $2.(*nodes.RangeVar)
-			$$ = &nodes.CopyStmt{
-				Relation:    rv,
-				Attlist:     $3,
-				IsFrom:      $4,
-				IsProgram:   true,
-				Filename:    $6,
-				Options:     $9,
+				Attlist:     $4,
+				IsFrom:      $5,
+				IsProgram:   $6,
+				Filename:    $7,
 				WhereClause: $11,
 			}
-		}
-	| COPY relation_expr opt_column_list copy_from PROGRAM Sconst copy_opt_list where_clause
-		{
-			rv := $2.(*nodes.RangeVar)
-			$$ = &nodes.CopyStmt{
-				Relation:    rv,
-				Attlist:     $3,
-				IsFrom:      $4,
-				IsProgram:   true,
-				Filename:    $6,
-				Options:     $7,
-				WhereClause: $8,
+			/* Concatenate user-supplied flags */
+			var opts *nodes.List
+			if $2 != nil {
+				opts = appendList(opts, $2)
 			}
+			if $8 != nil {
+				opts = appendList(opts, $8)
+			}
+			opts = concatLists(opts, $10)
+			stmt.Options = opts
+			$$ = stmt
 		}
-	| COPY '(' PreparableStmt ')' TO PROGRAM Sconst copy_opt_with '(' utility_option_list ')'
+	| COPY '(' PreparableStmt ')' TO opt_program copy_file_name copy_opt_with copy_options
 		{
 			$$ = &nodes.CopyStmt{
 				Query:     $3,
 				IsFrom:    false,
-				IsProgram: true,
+				IsProgram: $6,
 				Filename:  $7,
-				Options:   $10,
-			}
-		}
-	| COPY '(' PreparableStmt ')' TO PROGRAM Sconst copy_opt_list
-		{
-			$$ = &nodes.CopyStmt{
-				Query:     $3,
-				IsFrom:    false,
-				IsProgram: true,
-				Filename:  $7,
-				Options:   $8,
-			}
-		}
-	| COPY '(' PreparableStmt ')' TO copy_file_name copy_opt_with '(' utility_option_list ')'
-		{
-			$$ = &nodes.CopyStmt{
-				Query:    $3,
-				IsFrom:   false,
-				Filename: $6,
-				Options:  $9,
-			}
-		}
-	| COPY '(' PreparableStmt ')' TO copy_file_name copy_opt_list
-		{
-			$$ = &nodes.CopyStmt{
-				Query:    $3,
-				IsFrom:   false,
-				Filename: $6,
-				Options:  $7,
+				Options:   $9,
 			}
 		}
 	;
@@ -5092,6 +5039,16 @@ copy_from:
 	| TO { $$ = false }
 	;
 
+opt_program:
+	PROGRAM     { $$ = true }
+	| /* EMPTY */ { $$ = false }
+	;
+
+/*
+ * copy_file_name NULL indicates stdio is used. Whether stdin or stdout is
+ * used depends on the direction. (It really doesn't make sense to copy from
+ * stdout. We silently correct the "typo".)		 - AY 9/94
+ */
 copy_file_name:
 	Sconst      { $$ = $1 }
 	| STDIN     { $$ = "" }
@@ -5103,23 +5060,16 @@ copy_opt_with:
 	| /* EMPTY */ {}
 	;
 
+copy_options:
+	copy_opt_list                       { $$ = $1 }
+	| '(' utility_option_list ')'       { $$ = $2 }
+	;
+
 /* old-style COPY option syntax */
 copy_opt_list:
 	copy_opt_list copy_opt_item
 		{
-			if $2 != nil {
-				$$ = appendList($1, $2)
-			} else {
-				$$ = $1
-			}
-		}
-	| WITH copy_opt_item
-		{
-			if $2 != nil {
-				$$ = makeList($2)
-			} else {
-				$$ = nil
-			}
+			$$ = appendList($1, $2)
 		}
 	| /* EMPTY */ { $$ = nil }
 	;
@@ -5169,14 +5119,45 @@ copy_opt_item:
 		{
 			$$ = &nodes.DefElem{Defname: "force_not_null", Arg: $4}
 		}
+	| FORCE NOT NULL_P '*'
+		{
+			$$ = &nodes.DefElem{Defname: "force_not_null", Arg: &nodes.A_Star{}}
+		}
 	| FORCE NULL_P columnList
 		{
 			$$ = &nodes.DefElem{Defname: "force_null", Arg: $3}
+		}
+	| FORCE NULL_P '*'
+		{
+			$$ = &nodes.DefElem{Defname: "force_null", Arg: &nodes.A_Star{}}
 		}
 	| ENCODING Sconst
 		{
 			$$ = &nodes.DefElem{Defname: "encoding", Arg: &nodes.String{Str: $2}}
 		}
+	;
+
+/* The following exist for backward compatibility with very old versions */
+
+opt_binary:
+	BINARY
+		{
+			$$ = &nodes.DefElem{Defname: "format", Arg: &nodes.String{Str: "binary"}}
+		}
+	| /* EMPTY */ { $$ = nil }
+	;
+
+copy_delimiter:
+	opt_using DELIMITERS Sconst
+		{
+			$$ = &nodes.DefElem{Defname: "delimiter", Arg: &nodes.String{Str: $3}}
+		}
+	| /* EMPTY */ { $$ = nil }
+	;
+
+opt_using:
+	USING
+	| /* EMPTY */
 	;
 
 utility_option_list:
