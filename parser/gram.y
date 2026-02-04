@@ -10986,11 +10986,53 @@ columnref:
 		}
 	| ColId indirection
 		{
-			fields := &nodes.List{Items: []nodes.Node{&nodes.String{Str: $1}}}
+			// Replicate PostgreSQL's makeColumnRef() logic:
+			// If indirection contains A_Indices (subscripts), split the list.
+			// Field selections before the first subscript go into ColumnRef.Fields,
+			// everything from the first subscript onward goes into A_Indirection.
+			c := &nodes.ColumnRef{}
+			nfields := 0
+			var indirList *nodes.List
 			if $2 != nil {
-				fields.Items = append(fields.Items, $2.Items...)
+				indirList = $2
 			}
-			$$ = &nodes.ColumnRef{Fields: fields}
+			foundSubscript := false
+			if indirList != nil {
+				for idx, item := range indirList.Items {
+					if _, ok := item.(*nodes.A_Indices); ok {
+						ind := &nodes.A_Indirection{}
+						if nfields == 0 {
+							// Easy case: all indirection goes to A_Indirection
+							c.Fields = &nodes.List{Items: []nodes.Node{&nodes.String{Str: $1}}}
+							ind.Indirection = indirList
+						} else {
+							// Split: field selections before subscript go to ColumnRef.Fields,
+							// subscript and after go to A_Indirection.Indirection
+							fieldItems := make([]nodes.Node, 0, nfields+1)
+							fieldItems = append(fieldItems, &nodes.String{Str: $1})
+							fieldItems = append(fieldItems, indirList.Items[:idx]...)
+							c.Fields = &nodes.List{Items: fieldItems}
+							remaining := make([]nodes.Node, len(indirList.Items)-idx)
+							copy(remaining, indirList.Items[idx:])
+							ind.Indirection = &nodes.List{Items: remaining}
+						}
+						ind.Arg = c
+						$$ = ind
+						foundSubscript = true
+						break
+					}
+					nfields++
+				}
+			}
+			if !foundSubscript {
+				// No subscripting: all indirection gets added to field list
+				fieldItems := []nodes.Node{&nodes.String{Str: $1}}
+				if indirList != nil {
+					fieldItems = append(fieldItems, indirList.Items...)
+				}
+				c.Fields = &nodes.List{Items: fieldItems}
+				$$ = c
+			}
 		}
 	;
 
