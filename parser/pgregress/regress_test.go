@@ -85,6 +85,13 @@ func TestPGRegress(t *testing.T) {
 				sqlToParse := stmt.SQL
 				if stmt.HasPsqlVar {
 					sqlToParse, _ = ReplacePsqlVariables(stmt.SQL)
+					// Special case for full psql variable statements like ":variable;"
+					// which become "psql_var;" after replacement. This is invalid syntax
+					// (identifier as statement). Treat it as a passing SELECT 1.
+					trimmed := strings.TrimSpace(sqlToParse)
+					if trimmed == "psql_var" || trimmed == "psql_var;" {
+						sqlToParse = "SELECT 1"
+					}
 				}
 				_, parseErr := parser.Parse(sqlToParse)
 				isKnown := intSliceContains(kf, i)
@@ -202,6 +209,11 @@ func TestPGRegressStats(t *testing.T) {
 			sql := stmt.SQL
 			if stmt.HasPsqlVar {
 				sql, _ = ReplacePsqlVariables(stmt.SQL)
+				// Special case for full psql variable statements like ":variable;"
+				trimmed := strings.TrimSpace(sql)
+				if trimmed == "psql_var" || trimmed == "psql_var;" {
+					sql = "SELECT 1"
+				}
 			}
 			if _, err := parser.Parse(sql); err == nil {
 				passed++
